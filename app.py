@@ -2,27 +2,26 @@ import json
 import os
 import random
 import sqlite3
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 import streamlit as st
 
-# 本番は環境変数で場所を変えられる（永続ディスクのパスとか）
+# ===== DB backend switch =====
+# Render/本番は Neon(Postgres) を想定: DATABASE_URL を設定する
+# ローカルは SQLite でも動くようにフォールバックする
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_PG = bool(DATABASE_URL)
+
+# SQLite fallback (ローカル用)
 DB_PATH = Path(os.environ.get("MENUS_DB_PATH", "menus.db"))
 
+# 初期データ（Gitに載せる用のseed）
 SEED_DB_PATH = Path("menus_seed.db")
 
-def bootstrap_db():
-    # 本番でDBがまだ無いなら、seed をコピーして初期データを入れる
-    if not DB_PATH.exists() and SEED_DB_PATH.exists():
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(SEED_DB_PATH, DB_PATH)
-
-# 追加を許可するキー（これが合わないと保存できない）
+# 追加・削除を守るキー
 ADD_KEY = os.environ.get("ADD_KEY", "")
-# 削除も守りたいなら別キー（任意）
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 GENRES = ["和", "洋", "中", "その他"]
@@ -43,34 +42,75 @@ class MenuItem:
     role_options: List[RoleOption]
 
 
-def db() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.execute("PRAGMA foreign_keys = ON;")
-    con.execute("PRAGMA busy_timeout = 5000;")
-    return con
+def db():
+    if USE_PG:
+        # psycopg(bynary) を requirements に入れてね
+        import psycopg  # type: ignore
+
+        # Neonの接続文字列は sslmode=require が入ってる前提
+        return psycopg.connect(DATABASE_URL, connect_timeout=10)
+    else:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(DB_PATH, timeout=30)
+        con.execute("PRAGMA foreign_keys = ON;")
+        con.execute("PRAGMA busy_timeout = 5000;")
+        return con
+
+
+def _ph() -> str:
+    # SQL placeholder
+    return "%s" if USE_PG else "?"
 
 
 def ensure_db():
     con = db()
-    con.execute("PRAGMA journal_mode = WAL;")
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS items(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        genre TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
-    """)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS role_options(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_id INTEGER NOT NULL,
-        groups_json TEXT NOT NULL,
-        weight REAL NOT NULL DEFAULT 1.0,
-        FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
-    );
-    """)
+    cur = con.cursor()
+
+    if USE_PG:
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS items(
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            genre TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
+        """
+        )
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS role_options(
+            id BIGSERIAL PRIMARY KEY,
+            item_id BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            groups_json TEXT NOT NULL,
+            weight DOUBLE PRECISION NOT NULL DEFAULT 1.0
+        );
+        """
+        )
+    else:
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS items(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            genre TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        """
+        )
+        cur.execute(
+            """
+        CREATE TABLE IF NOT EXISTS role_options(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            groups_json TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        );
+        """
+        )
+
     con.commit()
     con.close()
 
@@ -78,21 +118,24 @@ def ensure_db():
 def load_items() -> List[MenuItem]:
     con = db()
     cur = con.cursor()
-    cur.execute("""
+    cur.execute(
+        """
         SELECT i.id, i.name, i.genre, ro.groups_json, ro.weight
         FROM items i
         LEFT JOIN role_options ro ON ro.item_id = i.id
         ORDER BY i.id ASC, ro.id ASC
-    """)
+    """
+    )
     rows = cur.fetchall()
     con.close()
 
     items: Dict[int, MenuItem] = {}
     for item_id, name, genre, groups_json, weight in rows:
-        if item_id not in items:
-            items[item_id] = MenuItem(id=item_id, name=name, genre=genre, role_options=[])
+        iid = int(item_id)
+        if iid not in items:
+            items[iid] = MenuItem(id=iid, name=name, genre=genre, role_options=[])
         if groups_json is not None:
-            items[item_id].role_options.append(
+            items[iid].role_options.append(
                 RoleOption(groups=json.loads(groups_json), weight=float(weight))
             )
 
@@ -102,22 +145,76 @@ def load_items() -> List[MenuItem]:
 def insert_item(name: str, genre: str, role_options: List[RoleOption]) -> None:
     con = db()
     cur = con.cursor()
-    cur.execute("INSERT INTO items(name, genre) VALUES(?, ?)", (name, genre))
-    item_id = cur.lastrowid
+    ph = _ph()
+
+    if USE_PG:
+        cur.execute(
+            f"INSERT INTO items(name, genre) VALUES({ph}, {ph}) RETURNING id",
+            (name, genre),
+        )
+        item_id = cur.fetchone()[0]
+    else:
+        cur.execute(
+            f"INSERT INTO items(name, genre) VALUES({ph}, {ph})",
+            (name, genre),
+        )
+        item_id = cur.lastrowid
+
     for opt in role_options:
         cur.execute(
-            "INSERT INTO role_options(item_id, groups_json, weight) VALUES(?, ?, ?)",
+            f"INSERT INTO role_options(item_id, groups_json, weight) VALUES({ph}, {ph}, {ph})",
             (item_id, json.dumps(opt.groups, ensure_ascii=False), float(opt.weight)),
         )
+
     con.commit()
     con.close()
 
 
 def delete_item_by_id(item_id: int) -> None:
     con = db()
-    con.execute("DELETE FROM items WHERE id = ?", (item_id,))
+    cur = con.cursor()
+    ph = _ph()
+    cur.execute(f"DELETE FROM items WHERE id = {ph}", (int(item_id),))
     con.commit()
     con.close()
+
+
+def seed_if_empty_from_sqlite():
+    # 本番(Render)はPostgresなので /var/data に触らない。seedはSQLiteファイルから読むだけ。
+    # DBが空のときだけ流し込む（初回起動用）
+    if not SEED_DB_PATH.exists():
+        return
+
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT COUNT(*) FROM items")
+    n = int(cur.fetchone()[0])
+    con.close()
+    if n > 0:
+        return
+
+    seed_con = sqlite3.connect(SEED_DB_PATH)
+    seed_cur = seed_con.cursor()
+    seed_cur.execute(
+        """
+        SELECT i.name, i.genre, ro.groups_json, ro.weight
+        FROM items i
+        JOIN role_options ro ON ro.item_id = i.id
+        ORDER BY i.id ASC, ro.id ASC
+    """
+    )
+    rows = seed_cur.fetchall()
+    seed_con.close()
+
+    bucket: Dict[Tuple[str, str], List[RoleOption]] = {}
+    for name, genre, groups_json, weight in rows:
+        key = (name, genre)
+        bucket.setdefault(key, []).append(
+            RoleOption(groups=json.loads(groups_json), weight=float(weight))
+        )
+
+    for (name, genre), opts in bucket.items():
+        insert_item(name, genre, opts)
 
 
 def score_selection(
@@ -152,7 +249,6 @@ def generate_menu(
     counts: Dict[str, int],
     tries: int = 450,
 ) -> Tuple[List[Tuple[MenuItem, RoleOption]], int]:
-    # needed を「グループのmultiset（重複あり）」で持つ
     needed: List[str] = []
     for g in GROUPS:
         needed += [g] * max(0, int(counts.get(g, 0)))
@@ -213,9 +309,10 @@ def generate_menu(
     return best, best_score
 
 
-# ---- UI ----
-bootstrap_db()
+# ===== UI =====
 ensure_db()
+seed_if_empty_from_sqlite()
+
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
 st.title("🍚 献立ガチャ")
 
@@ -224,8 +321,8 @@ is_protected_add = bool(ADD_KEY)
 
 if is_protected_add:
     add_key_input = st.text_input("追加キー（知ってる人だけ追加できる）", type="password")
-    can_add = (add_key_input == ADD_KEY)
-    if not can_add and add_key_input:
+    can_add = add_key_input == ADD_KEY
+    if (not can_add) and add_key_input:
         st.warning("追加キーが違うニャ")
 else:
     can_add = True
@@ -269,8 +366,13 @@ with st.expander("メニューを追加", expanded=True):
                 st.session_state.role_opts = []
                 st.success("追加しました")
                 st.rerun()
-            except sqlite3.IntegrityError:
-                st.error("同じ名前がもうあるみたい。別名にして（ごめんね）")
+            except Exception as e:
+                # Postgres/SQLiteで例外型が揃わないのでざっくり
+                msg = str(e)
+                if "unique" in msg.lower() or "UNIQUE" in msg:
+                    st.error("同じ名前がもうあるみたい。別名にして（ごめんね）")
+                else:
+                    st.error(f"追加に失敗した: {e}")
 
     if save_disabled:
         st.caption("追加キーが合ってないと保存できないニャ")
@@ -293,7 +395,6 @@ else:
             st.caption("ADMIN_KEY が未設定だから削除はロック中ニャ")
         else:
             admin_key_input = st.text_input("管理キー", type="password")
-
             if admin_key_input != ADMIN_KEY:
                 if admin_key_input:
                     st.warning("管理キーが違うニャ")
@@ -309,18 +410,6 @@ else:
                         delete_item_by_id(options[key])
                         st.success("消しました")
                         st.rerun()
-
-
-            options = {f"{it.id}: {it.name}": it.id for it in items}
-            key = st.selectbox("消す料理を選ぶ", list(options.keys()))
-            confirm = st.checkbox("本当に削除する")
-            if st.button("削除する"):
-                if not confirm:
-                    st.warning("確認にチェックを入れてください")
-                else:
-                    delete_item_by_id(options[key])
-                    st.success("消しました")
-                    st.rerun()
 
 st.divider()
 st.subheader("今日の献立を引く")
@@ -352,3 +441,9 @@ if st.button("ガチャ！"):
         for it, opt in selection:
             st.write(f"・{it.name}（{it.genre} / 役割: {'・'.join(opt.groups)}）")
         st.caption(f"スコア: {score}")
+
+# おまけ：動作確認用
+if USE_PG:
+    st.caption("DB: Postgres（Neon）")
+else:
+    st.caption("DB: SQLite（ローカル）")
