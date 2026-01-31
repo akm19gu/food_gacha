@@ -8,3 +8,6 @@ menus.db-shm
 menus.db-journal
 
 .streamlit/secrets.toml
+
+init_db.py
+
