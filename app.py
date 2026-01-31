@@ -256,7 +256,11 @@ def sort_items(items: List[MenuItem], sort_key: str, asc: bool) -> List[MenuItem
     if sort_key == "料理名":
         return sorted(items, key=lambda x: x.name.lower(), reverse=reverse)
     if sort_key == "ジャンル":
-        return sorted(items, key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999, reverse=reverse)
+        return sorted(
+            items,
+            key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999,
+            reverse=reverse,
+        )
     if sort_key == "役割の数":
         return sorted(items, key=lambda x: len(item_any_groups(x)), reverse=reverse)
     return items
@@ -267,17 +271,6 @@ bootstrap_db()
 ensure_db()
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
 st.title("🍚 献立ガチャ")
-
-# 追加キー入力（ADD_KEY が未設定ならローカル用に無制限）
-is_protected_add = bool(ADD_KEY)
-if is_protected_add:
-    add_key_input = st.text_input("追加キー（知ってる人だけ追加できる）", type="password")
-    can_add = (add_key_input == ADD_KEY)
-    if not can_add and add_key_input:
-        st.warning("追加キーが違うニャ")
-else:
-    can_add = True
-    st.caption("※ ADD_KEY が未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
 
 items = load_items()
 
@@ -346,6 +339,20 @@ with st.expander("入力フォームを開く", expanded=True):
             st.write(f"・{i+1}: {' / '.join(opt.groups)}  重み={opt.weight}")
         if st.button("役割パターンを全部クリア"):
             st.session_state.role_opts = []
+
+    # --- 追加キーを「保存ボタンの前」に配置 ---
+    if ADD_KEY:
+        add_key_input = st.text_input(
+            "追加キー（知ってる人だけ保存できる）",
+            type="password",
+            key="add_key_input_in_add_form",
+        )
+        can_add = (add_key_input == ADD_KEY)
+        if add_key_input and not can_add:
+            st.warning("追加キーが違うニャ")
+    else:
+        can_add = True
+        st.caption("※ ADD_KEY が未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
 
     save_disabled = not can_add
     if st.button("このメニューを保存", disabled=save_disabled):
