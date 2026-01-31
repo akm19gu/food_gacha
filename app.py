@@ -293,10 +293,23 @@ else:
             st.caption("ADMIN_KEY が未設定だから削除はロック中ニャ")
         else:
             admin_key_input = st.text_input("管理キー", type="password")
+
             if admin_key_input != ADMIN_KEY:
                 if admin_key_input:
                     st.warning("管理キーが違うニャ")
-                st.stop()
+                st.caption("管理キーが合ってると削除できるの")
+            else:
+                options = {f"{it.id}: {it.name}": it.id for it in items}
+                key = st.selectbox("消す料理を選ぶ", list(options.keys()))
+                confirm = st.checkbox("本当に削除する")
+                if st.button("削除する"):
+                    if not confirm:
+                        st.warning("確認にチェックを入れてください")
+                    else:
+                        delete_item_by_id(options[key])
+                        st.success("消しました")
+                        st.rerun()
+
 
             options = {f"{it.id}: {it.name}": it.id for it in items}
             key = st.selectbox("消す料理を選ぶ", list(options.keys()))
