@@ -1,0 +1,10 @@
+﻿.venv/
+__pycache__/
+*.pyc
+
+menus.db
+menus.db-wal
+menus.db-shm
+menus.db-journal
+
+.streamlit/secrets.toml
