@@ -1,1 +1,2 @@
-﻿streamlit
+streamlit>=1.31
+psycopg[binary]>=3.1
