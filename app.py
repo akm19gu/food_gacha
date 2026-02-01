@@ -76,7 +76,6 @@ def db_sqlite() -> sqlite3.Connection:
 def db_postgres():
     # psycopg3
     import psycopg
-
     return psycopg.connect(DATABASE_URL)
 
 
@@ -243,6 +242,37 @@ def update_item_difficulty(item_id: int, difficulty: int) -> None:
     con.close()
 
 
+def feasible_auto_base_genres(
+    items: List[MenuItem],
+    counts: Dict[str, int],
+    difficulty_range: Tuple[int, int],
+) -> List[str]:
+    """自動ジャンルで '基準ジャンル + その他' だけで必要グループを満たせそうな基準ジャンルを返す"""
+    dmin, dmax = difficulty_range
+    required = [g for g in GROUPS if int(counts.get(g, 0)) > 0]
+
+    bases = [g for g in GENRES if g != "その他"]
+    ok_bases: List[str] = []
+
+    for base in bases:
+        allowed = {base, "その他"}
+        ok = True
+        for group in required:
+            exists = any(
+                (it.genre in allowed)
+                and (dmin <= int(it.difficulty) <= dmax)
+                and any(group in opt.groups for opt in it.role_options)
+                for it in items
+            )
+            if not exists:
+                ok = False
+                break
+        if ok:
+            ok_bases.append(base)
+
+    return ok_bases
+
+
 # -----------------------------
 # ガチャロジック
 # -----------------------------
@@ -306,6 +336,7 @@ def generate_candidates(
     preferred_genre: Optional[str],
     counts: Dict[str, int],
     difficulty_range: Tuple[int, int],
+    base_genre: Optional[str] = None,   # ★追加：自動ジャンル時の基準ジャンル
     tries: int = 650,
     keep: int = 260,
 ) -> List[Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]]:
@@ -343,9 +374,17 @@ def generate_candidates(
                 if not (dmin <= int(it.difficulty) <= dmax):
                     continue
 
+                # ★自動ジャンルなら「基準ジャンル + その他」だけ許可
+                if preferred_genre == "自動" and base_genre is not None:
+                    if it.genre not in (base_genre, "その他"):
+                        continue
+
                 genre_bonus = 1.0
                 if preferred_genre and preferred_genre != "自動":
                     genre_bonus = 1.25 if it.genre == preferred_genre else 0.9
+                elif preferred_genre == "自動" and base_genre is not None:
+                    # 基準ジャンルを少し優遇、その他は少し控えめ
+                    genre_bonus = 1.18 if it.genre == base_genre else 0.96
 
                 for opt in it.role_options:
                     if target in opt.groups:
@@ -444,7 +483,6 @@ def pick_menu_from_candidates(
 
     idx = random.choices(range(len(pool)), weights=weights, k=1)[0]
     return pool[idx]
-
 
 
 # -----------------------------
@@ -582,7 +620,6 @@ if st.session_state.difficulty_preset is not None:
 
 difficulty_range, pick_mode = resolve_difficulty_preset(st.session_state.difficulty_preset)
 
-
 st.write("品数（基本は全部1。0にするとその枠は無し）")
 cA, cB, cC, cD, cE = st.columns(5)
 n_shushoku = cA.selectbox("主食", [0, 1, 2, 3], index=1)
@@ -604,9 +641,26 @@ if "recent_menu_sigs" not in st.session_state:
 if "last_menu_ids" not in st.session_state:
     st.session_state.last_menu_ids = []
 
-# ★ここを差し替え：primary + full width + ボタン気分 + 似通い回避
+# ★ここ：primary + full width + ボタン気分 + 似通い回避 + 自動ジャンルは統一（その他は混ぜOK）
 if st.button("ガチャ！", type="primary", use_container_width=True):
-    candidates = generate_candidates(items, preferred, counts, difficulty_range)
+    base_genre = None
+    if preferred == "自動":
+        bases = feasible_auto_base_genres(items, counts, difficulty_range)
+        if bases:
+            base_genre = random.choice(bases)
+        else:
+            # 「その他」しか無いならOK。それ以外があるのに bases が空なら不足
+            if any(it.genre != "その他" for it in items):
+                st.error("自動ジャンルで揃えられる候補が足りない（和/洋/中のどれか + その他 で組めるように登録を増やして）")
+                st.stop()
+
+    candidates = generate_candidates(
+        items,
+        preferred,
+        counts,
+        difficulty_range,
+        base_genre=base_genre,
+    )
 
     selection, score, sig, ids = pick_menu_from_candidates(
         candidates,
@@ -621,6 +675,9 @@ if st.button("ガチャ！", type="primary", use_container_width=True):
         # 履歴更新（直近8回ぶん）
         st.session_state.recent_menu_sigs = (st.session_state.recent_menu_sigs + [sig])[-8:]
         st.session_state.last_menu_ids = ids
+
+        if preferred == "自動" and base_genre:
+            st.caption(f"ジャンル: {base_genre}（自動 / その他は混ぜる）")
 
         st.markdown("**今日の献立**")
         for it, opt in selection:
