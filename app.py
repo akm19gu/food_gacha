@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import random
@@ -573,6 +574,50 @@ div[data-testid="stButton"] > button[kind="primary"]:active{
 section.main .block-container{
   padding-top: 1.4rem;
 }
+/* ジャンル/面倒くささ の“選択ボタン”を 2行ぶんの高さに固定して中央寄せ */
+div[data-testid="stButton"] > button[kind="secondary"]{
+  height: 3.4rem;              /* 2行ぶん固定（足りなければ 3.8rem へ） */
+  padding: 0.55rem 0.6rem;
+  display: flex;
+  align-items: center;         /* 縦中央 */
+  justify-content: center;     /* 横中央 */
+  text-align: center;
+  white-space: normal;         /* 折り返しOK */
+  line-height: 1.15;
+}
+/* ===== 結果（今日の献立）をカード表示で目立たせる ===== */
+.result-card{
+  border: 2px solid rgba(255,255,255,0.22);
+  background: rgba(255,255,255,0.06);
+  padding: 1.05rem 1.15rem;
+  border-radius: 18px;
+  box-shadow: 0 12px 26px rgba(0,0,0,0.18);
+  margin-top: 0.7rem;
+  margin-bottom: 1.6rem;
+}
+.result-title{
+  font-size: 1.35rem;
+  font-weight: 900;
+  margin: 0 0 0.7rem 0;
+  letter-spacing: 0.01em;
+}
+.result-item{
+  font-size: 1.08rem;
+  line-height: 1.45;
+  margin: 0.35rem 0;
+}
+.result-meta{
+  margin-top: 0.75rem;
+  font-size: 0.92rem;
+  opacity: 0.85;
+}
+
+/* ===== 区切り（登録済みメニューの前）を“間を空けて”見せる ===== */
+hr{
+  margin: 2.0rem 0 1.6rem 0;
+  border: 0;
+  border-top: 1px solid rgba(140,140,140,0.35);
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -586,7 +631,28 @@ items = load_items()
 # 1) ガチャ（最上段）
 st.header("🎲 今日の献立を引く")
 
-preferred = st.selectbox("ジャンルの気分", ["自動"] + GENRES, index=0)
+# ジャンルの気分（ボタン式）
+if "genre_choice" not in st.session_state:
+    st.session_state.genre_choice = "自動"
+
+st.write("ジャンルの気分（押さなければ自動）")
+g1, g2, g3, g4, g5 = st.columns(5)
+
+if g1.button("自動", key="btn_genre_auto", use_container_width=True):
+    st.session_state.genre_choice = "自動"
+if g2.button("和食", key="btn_genre_wa", use_container_width=True):
+    st.session_state.genre_choice = "和"
+if g3.button("洋食", key="btn_genre_yo", use_container_width=True):
+    st.session_state.genre_choice = "洋"
+if g4.button("中華", key="btn_genre_chu", use_container_width=True):
+    st.session_state.genre_choice = "中"
+if g5.button("その他", key="btn_genre_other", use_container_width=True):
+    st.session_state.genre_choice = "その他"
+
+
+st.caption(f"いま: {st.session_state.genre_choice}")
+
+preferred = st.session_state.genre_choice
 
 # 面倒くささの気分（ボタン式）
 if "difficulty_preset" not in st.session_state:
@@ -594,13 +660,13 @@ if "difficulty_preset" not in st.session_state:
 
 st.write("面倒くささの気分（押さなければ自動）")
 b1, b2, b3, b4 = st.columns(4)
-if b1.button("レンチンばんざい", key="btn_preset_microwave"):
+if b1.button("レンチンばんざい", key="btn_preset_microwave", use_container_width=True):
     st.session_state.difficulty_preset = "microwave"
-if b2.button("いつものごはん", key="btn_preset_usual"):
+if b2.button("いつものごはん", key="btn_preset_usual", use_container_width=True):
     st.session_state.difficulty_preset = "usual"
-if b3.button("ごうかなディナー", key="btn_preset_deluxe"):
+if b3.button("ごうかなディナー", key="btn_preset_deluxe", use_container_width=True):
     st.session_state.difficulty_preset = "deluxe"
-if b4.button("シェフのおまかせコース", key="btn_preset_chef"):
+if b4.button("シェフのおまかせコース", key="btn_preset_chef", use_container_width=True):
     st.session_state.difficulty_preset = "chef"
 
 label = {
@@ -676,13 +742,30 @@ if st.button("ガチャ！", type="primary", use_container_width=True):
         st.session_state.recent_menu_sigs = (st.session_state.recent_menu_sigs + [sig])[-8:]
         st.session_state.last_menu_ids = ids
 
+        # ここから結果表示（カード）
+        auto_genre_line = ""
         if preferred == "自動" and base_genre:
-            st.caption(f"ジャンル: {base_genre}（自動 / その他は混ぜる）")
+            auto_genre_line = f"ジャンル: {html.escape(base_genre)}（自動 / その他は混ぜる）<br>"
 
-        st.markdown("**今日の献立**")
+        lines = []
         for it, opt in selection:
-            st.write(f"・{it.name}（{it.genre} / 面倒くささ:{it.difficulty} / 役割: {'・'.join(opt.groups)}）")
-        st.caption(f"スコア: {score}")
+            line = (
+                f"・{html.escape(it.name)}"
+                f"（{html.escape(it.genre)} / 面倒くささ:{int(it.difficulty)} / 役割: {'・'.join(html.escape(x) for x in opt.groups)}）"
+            )
+            lines.append(f"<div class='result-item'>{line}</div>")
+
+        st.markdown(
+            f"""
+<div class="result-card">
+  <div class="result-title">今日の献立</div>
+  <div class="result-meta">{auto_genre_line}スコア: {int(score)}</div>
+  {''.join(lines)}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
 
 
 # 2) メニュー追加（中段）
