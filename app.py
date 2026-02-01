@@ -9,28 +9,36 @@ from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 
-# 本番は環境変数で場所を変えられる（永続ディスクのパスとか）
-DB_PATH = Path(os.environ.get("MENUS_DB_PATH", "menus.db"))
+# -----------------------------
+# 設定
+# -----------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()  # Neon等(Postgres)
+USE_POSTGRES = bool(DATABASE_URL)
 
+# sqlite fallback（ローカルや保険用）
+DB_PATH = Path(os.environ.get("MENUS_DB_PATH", "menus.db"))
 SEED_DB_PATH = Path("menus_seed.db")
 
-
-def bootstrap_db():
-    # 本番でDBがまだ無いなら、seed をコピーして初期データを入れる
-    if not DB_PATH.exists() and SEED_DB_PATH.exists():
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(SEED_DB_PATH, DB_PATH)
-
-
-# 追加を許可するキー（これが合わないと保存できない）
+# 追加を許可するキー（合わないと保存できない）
 ADD_KEY = os.environ.get("ADD_KEY", "")
-# 削除も守りたいなら別キー（任意）
+# 削除・編集を守りたいなら管理キー（任意）
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 GENRES = ["和", "洋", "中", "その他"]
 GROUPS = ["主菜", "副菜", "主食", "乳製品", "果物"]
 
+DIFFICULTY_LABELS = {
+    1: "冷食・レンチン",
+    2: "かなり簡単",
+    3: "ふつう",
+    4: "手間あり",
+    5: "コース料理",
+}
 
+
+# -----------------------------
+# 型
+# -----------------------------
 @dataclass
 class RoleOption:
     groups: List[str]
@@ -42,41 +50,102 @@ class MenuItem:
     id: int
     name: str
     genre: str
+    difficulty: int
     role_options: List[RoleOption]
 
 
-def db() -> sqlite3.Connection:
+# -----------------------------
+# DB ユーティリティ
+# -----------------------------
+def bootstrap_db_sqlite():
+    # sqlite運用時：本番でDBがまだ無いならseedをコピー
+    if not USE_POSTGRES:
+        if (not DB_PATH.exists()) and SEED_DB_PATH.exists():
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(SEED_DB_PATH, DB_PATH)
+
+
+def db_sqlite() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH, timeout=30)
+    con = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     con.execute("PRAGMA foreign_keys = ON;")
     con.execute("PRAGMA busy_timeout = 5000;")
     return con
 
 
+def db_postgres():
+    # psycopg3
+    import psycopg
+
+    return psycopg.connect(DATABASE_URL)
+
+
+def db():
+    return db_postgres() if USE_POSTGRES else db_sqlite()
+
+
 def ensure_db():
     con = db()
-    con.execute("PRAGMA journal_mode = WAL;")
-    con.execute(
-        """
-    CREATE TABLE IF NOT EXISTS items(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        genre TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now'))
-    );
-    """
-    )
-    con.execute(
-        """
-    CREATE TABLE IF NOT EXISTS role_options(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        item_id INTEGER NOT NULL,
-        groups_json TEXT NOT NULL,
-        weight REAL NOT NULL DEFAULT 1.0,
-        FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
-    );
-    """
-    )
+    cur = con.cursor()
+
+    if USE_POSTGRES:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS items(
+                id BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                genre TEXT NOT NULL,
+                difficulty SMALLINT NOT NULL DEFAULT 3,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_options(
+                id BIGSERIAL PRIMARY KEY,
+                item_id BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                groups_json TEXT NOT NULL,
+                weight DOUBLE PRECISION NOT NULL DEFAULT 1.0
+            );
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS role_options_item_id_idx ON role_options(item_id);")
+
+        # 既存DBに後付けでdifficultyが無い場合に備える（冪等）
+        cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS difficulty SMALLINT NOT NULL DEFAULT 3;")
+
+    else:
+        cur.execute("PRAGMA journal_mode = WAL;")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS items(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                genre TEXT NOT NULL,
+                difficulty INTEGER NOT NULL DEFAULT 3,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_options(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id INTEGER NOT NULL,
+                groups_json TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        # もし昔のDBでdifficulty列が無い場合に後付け
+        cur.execute("PRAGMA table_info(items);")
+        cols = {row[1] for row in cur.fetchall()}
+        if "difficulty" not in cols:
+            cur.execute("ALTER TABLE items ADD COLUMN difficulty INTEGER NOT NULL DEFAULT 3;")
+
     con.commit()
     con.close()
 
@@ -84,21 +153,31 @@ def ensure_db():
 def load_items() -> List[MenuItem]:
     con = db()
     cur = con.cursor()
+
     cur.execute(
         """
-        SELECT i.id, i.name, i.genre, ro.groups_json, ro.weight
+        SELECT
+            i.id, i.name, i.genre, COALESCE(i.difficulty, 3) as difficulty,
+            ro.groups_json, ro.weight
         FROM items i
         LEFT JOIN role_options ro ON ro.item_id = i.id
         ORDER BY i.id ASC, ro.id ASC
-    """
+        """
     )
     rows = cur.fetchall()
     con.close()
 
     items: Dict[int, MenuItem] = {}
-    for item_id, name, genre, groups_json, weight in rows:
+    for row in rows:
+        item_id, name, genre, difficulty, groups_json, weight = row
         if item_id not in items:
-            items[item_id] = MenuItem(id=item_id, name=name, genre=genre, role_options=[])
+            items[item_id] = MenuItem(
+                id=int(item_id),
+                name=str(name),
+                genre=str(genre),
+                difficulty=int(difficulty) if difficulty is not None else 3,
+                role_options=[],
+            )
         if groups_json is not None:
             items[item_id].role_options.append(
                 RoleOption(groups=json.loads(groups_json), weight=float(weight))
@@ -107,27 +186,66 @@ def load_items() -> List[MenuItem]:
     return [x for x in items.values() if x.role_options]
 
 
-def insert_item(name: str, genre: str, role_options: List[RoleOption]) -> None:
+def insert_item(name: str, genre: str, difficulty: int, role_options: List[RoleOption]) -> None:
     con = db()
     cur = con.cursor()
-    cur.execute("INSERT INTO items(name, genre) VALUES(?, ?)", (name, genre))
-    item_id = cur.lastrowid
-    for opt in role_options:
+
+    if USE_POSTGRES:
         cur.execute(
-            "INSERT INTO role_options(item_id, groups_json, weight) VALUES(?, ?, ?)",
-            (item_id, json.dumps(opt.groups, ensure_ascii=False), float(opt.weight)),
+            "INSERT INTO items(name, genre, difficulty) VALUES (%s, %s, %s) RETURNING id",
+            (name, genre, int(difficulty)),
         )
+        item_id = cur.fetchone()[0]
+        for opt in role_options:
+            cur.execute(
+                "INSERT INTO role_options(item_id, groups_json, weight) VALUES (%s, %s, %s)",
+                (int(item_id), json.dumps(opt.groups, ensure_ascii=False), float(opt.weight)),
+            )
+    else:
+        cur.execute(
+            "INSERT INTO items(name, genre, difficulty) VALUES(?, ?, ?)",
+            (name, genre, int(difficulty)),
+        )
+        item_id = cur.lastrowid
+        for opt in role_options:
+            cur.execute(
+                "INSERT INTO role_options(item_id, groups_json, weight) VALUES(?, ?, ?)",
+                (int(item_id), json.dumps(opt.groups, ensure_ascii=False), float(opt.weight)),
+            )
+
     con.commit()
     con.close()
 
 
 def delete_item_by_id(item_id: int) -> None:
     con = db()
-    con.execute("DELETE FROM items WHERE id = ?", (item_id,))
+    cur = con.cursor()
+
+    if USE_POSTGRES:
+        cur.execute("DELETE FROM items WHERE id = %s", (int(item_id),))
+    else:
+        cur.execute("DELETE FROM items WHERE id = ?", (int(item_id),))
+
     con.commit()
     con.close()
 
 
+def update_item_difficulty(item_id: int, difficulty: int) -> None:
+    con = db()
+    cur = con.cursor()
+
+    if USE_POSTGRES:
+        cur.execute("UPDATE items SET difficulty = %s WHERE id = %s", (int(difficulty), int(item_id)))
+    else:
+        cur.execute("UPDATE items SET difficulty = ? WHERE id = ?", (int(difficulty), int(item_id)))
+
+    con.commit()
+    con.close()
+
+
+# -----------------------------
+# ガチャロジック
+# -----------------------------
 def score_selection(
     selection: List[Tuple[MenuItem, RoleOption]],
     preferred_genre: Optional[str],
@@ -158,9 +276,11 @@ def generate_menu(
     items: List[MenuItem],
     preferred_genre: Optional[str],
     counts: Dict[str, int],
+    difficulty_range: Tuple[int, int],
     tries: int = 450,
 ) -> Tuple[List[Tuple[MenuItem, RoleOption]], int]:
-    # needed を「グループのmultiset（重複あり）」で持つ
+    dmin, dmax = difficulty_range
+
     needed: List[str] = []
     for g in GROUPS:
         needed += [g] * max(0, int(counts.get(g, 0)))
@@ -184,6 +304,8 @@ def generate_menu(
             cands: List[Tuple[MenuItem, RoleOption, float]] = []
             for it in items:
                 if it.id in chosen_ids:
+                    continue
+                if not (dmin <= int(it.difficulty) <= dmax):
                     continue
 
                 genre_bonus = 1.0
@@ -221,6 +343,9 @@ def generate_menu(
     return best, best_score
 
 
+# -----------------------------
+# 一覧整形
+# -----------------------------
 def item_can_cover_group(it: MenuItem, group: str) -> bool:
     return any(group in opt.groups for opt in it.role_options)
 
@@ -242,6 +367,7 @@ def build_rows(items: List[MenuItem]) -> List[Dict[str, str]]:
                 "id": it.id,
                 "料理名": it.name,
                 "ジャンル": it.genre,
+                "面倒くささ": f"{it.difficulty}（{DIFFICULTY_LABELS.get(int(it.difficulty), '')}）",
                 "役割": "・".join(item_any_groups(it)),
                 "役割パターン": " / ".join(patterns),
             }
@@ -256,30 +382,36 @@ def sort_items(items: List[MenuItem], sort_key: str, asc: bool) -> List[MenuItem
     if sort_key == "料理名":
         return sorted(items, key=lambda x: x.name.lower(), reverse=reverse)
     if sort_key == "ジャンル":
-        return sorted(
-            items,
-            key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999,
-            reverse=reverse,
-        )
+        return sorted(items, key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999, reverse=reverse)
     if sort_key == "役割の数":
         return sorted(items, key=lambda x: len(item_any_groups(x)), reverse=reverse)
+    if sort_key == "面倒くささ":
+        return sorted(items, key=lambda x: int(x.difficulty), reverse=reverse)
     return items
 
 
-# ---- UI ----
-bootstrap_db()
+# -----------------------------
+# UI
+# -----------------------------
+bootstrap_db_sqlite()
 ensure_db()
+
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
 st.title("🍚 献立ガチャ")
 
 items = load_items()
 
-# ---------------------------
 # 1) ガチャ（最上段）
-# ---------------------------
 st.header("🎲 今日の献立を引く")
 
 preferred = st.selectbox("ジャンルの気分", ["自動"] + GENRES, index=0)
+
+diff_min, diff_max = st.slider(
+    "面倒くささの気分（範囲）",
+    min_value=1,
+    max_value=5,
+    value=(1, 5),
+)
 
 st.write("品数（基本は全部1。0にするとその枠は無し）")
 cA, cB, cC, cD, cE = st.columns(5)
@@ -298,20 +430,18 @@ counts = {
 }
 
 if st.button("ガチャ！"):
-    selection, score = generate_menu(items, preferred, counts)
+    selection, score = generate_menu(items, preferred, counts, (diff_min, diff_max))
     if not selection:
-        st.error("その品数を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
+        st.error("その条件を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
     else:
         st.markdown("**今日の献立**")
         for it, opt in selection:
-            st.write(f"・{it.name}（{it.genre} / 役割: {'・'.join(opt.groups)}）")
+            st.write(f"・{it.name}（{it.genre} / 面倒くささ:{it.difficulty} / 役割: {'・'.join(opt.groups)}）")
         st.caption(f"スコア: {score}")
 
 st.divider()
 
-# ---------------------------
 # 2) メニュー追加（中段）
-# ---------------------------
 st.header("➕ メニューを追加")
 
 if "role_opts" not in st.session_state:
@@ -324,10 +454,10 @@ with st.expander("入力フォームを開く", expanded=True):
 
     st.write("役割パターンを追加して。1品が複数グループを兼ねてもOK。")
     cc1, cc2 = st.columns(2)
-    gsel = cc1.multiselect("このパターンのグループ", GROUPS, default=[])
-    w = cc2.number_input("このパターンの出やすさ（重み）", min_value=0.1, value=1.0, step=0.1)
+    gsel = cc1.multiselect("このパターンのグループ", GROUPS, default=[], key="add_groups")
+    w = cc2.number_input("このパターンの出やすさ（重み）", min_value=0.1, value=1.0, step=0.1, key="add_weight")
 
-    if st.button("この役割パターンを追加"):
+    if st.button("この役割パターンを追加", key="btn_add_roleopt"):
         if gsel:
             st.session_state.role_opts.append(RoleOption(groups=gsel, weight=float(w)))
         else:
@@ -337,10 +467,19 @@ with st.expander("入力フォームを開く", expanded=True):
         st.write("いまの役割パターン")
         for i, opt in enumerate(st.session_state.role_opts):
             st.write(f"・{i+1}: {' / '.join(opt.groups)}  重み={opt.weight}")
-        if st.button("役割パターンを全部クリア"):
+        if st.button("役割パターンを全部クリア", key="btn_clear_roleopt"):
             st.session_state.role_opts = []
 
-    # --- 追加キーを「保存ボタンの前」に配置 ---
+    difficulty = st.selectbox(
+        "面倒くささ（1=冷食〜5=コース料理）",
+        [1, 2, 3, 4, 5],
+        index=2,
+        format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
+        key="add_difficulty",
+    )
+
+    # --- 追加キーを「保存ボタンの直前」に配置 ---
+    can_add = True
     if ADD_KEY:
         add_key_input = st.text_input(
             "追加キー（知ってる人だけ保存できる）",
@@ -351,48 +490,44 @@ with st.expander("入力フォームを開く", expanded=True):
         if add_key_input and not can_add:
             st.warning("追加キーが違うニャ")
     else:
-        can_add = True
-        st.caption("※ ADD_KEY が未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
+        st.caption("※ ADD_KEY 未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
 
     save_disabled = not can_add
-    if st.button("このメニューを保存", disabled=save_disabled):
+    if st.button("このメニューを保存", disabled=save_disabled, key="btn_save_item"):
         if not name.strip():
             st.warning("料理名が空っぽ")
         elif not st.session_state.role_opts:
             st.warning("役割パターンがないと引けない")
         else:
             try:
-                insert_item(name.strip(), genre, st.session_state.role_opts)
+                insert_item(name.strip(), genre, int(difficulty), st.session_state.role_opts)
                 st.session_state.role_opts = []
                 st.success("追加しました")
                 st.rerun()
-            except sqlite3.IntegrityError:
-                st.error("同じ名前がもうあるみたい。別名にして（ごめんね）")
+            except Exception as e:
+                # sqlite: IntegrityError / postgres: UniqueViolation などをまとめて扱う
+                st.error("同じ名前がもうあるか、DBエラーが出たみたい。別名にしてみて")
+                st.caption(str(e)[:200])
 
     if save_disabled:
         st.caption("追加キーが合ってないと保存できないニャ")
 
 st.divider()
 
-# ---------------------------
 # 3) 登録済みメニュー（下段：絞り込み+ソート、全部表示も可）
-# ---------------------------
 st.header("📚 登録済みメニュー")
 
 if not items:
     st.info("まずは ごはん(主食/和), 味噌汁(副菜/和), 生姜焼き(主菜/和) あたりを入れてみよう")
 else:
-    # デフォルトは「絞り込み表示」
     c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
     view_mode = c1.selectbox("表示モード", ["絞り込み（おすすめ）", "全部表示"], index=0)
 
-    # 絞り込み条件
     genre_filter = c2.selectbox("ジャンルで絞り込み", ["（指定なし）"] + GENRES, index=0)
     group_filter = c3.selectbox("役割で絞り込み", ["（指定なし）"] + GROUPS, index=0)
 
-    # ソート
     cS1, cS2 = st.columns([1.4, 1.0])
-    sort_key = cS1.selectbox("ソート", ["新しい順", "料理名", "ジャンル", "役割の数"], index=0)
+    sort_key = cS1.selectbox("ソート", ["新しい順", "料理名", "ジャンル", "役割の数", "面倒くささ"], index=0)
     asc = (cS2.selectbox("順序", ["降順", "昇順"], index=0) == "昇順")
 
     filtered = items[:]
@@ -407,21 +542,36 @@ else:
     st.caption(f"表示件数: {len(filtered)} / 全体: {len(items)}")
     st.dataframe(build_rows(filtered), use_container_width=True, hide_index=True)
 
-    # 削除UI（管理）
-    with st.expander("メニューを削除（管理）", expanded=False):
+    # 管理（難易度編集 & 削除）
+    with st.expander("管理（難易度編集・削除）", expanded=False):
         if not ADMIN_KEY:
-            st.caption("ADMIN_KEY が未設定だから削除はロック中ニャ")
+            st.caption("ADMIN_KEY が未設定だから管理はロック中ニャ")
         else:
-            admin_key_input = st.text_input("管理キー", type="password")
+            admin_key_input = st.text_input("管理キー", type="password", key="admin_key_input")
             if admin_key_input != ADMIN_KEY:
                 if admin_key_input:
                     st.warning("管理キーが違うニャ")
-                st.caption("管理キーが合ってると削除できるの")
+                st.caption("管理キーが合ってると編集・削除できるの")
             else:
-                options = {f"{it.id}: {it.name}": it.id for it in items}
-                key = st.selectbox("消す料理を選ぶ", list(options.keys()))
-                confirm = st.checkbox("本当に削除する")
-                if st.button("削除する"):
+                st.subheader("難易度を編集")
+                options = {f"{it.id}: {it.name}（いま:{it.difficulty}）": it.id for it in items}
+                pick = st.selectbox("対象", list(options.keys()), key="diff_target")
+                new_diff = st.selectbox(
+                    "新しい面倒くささ",
+                    [1, 2, 3, 4, 5],
+                    index=2,
+                    format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
+                    key="diff_value",
+                )
+                if st.button("難易度を更新", key="btn_update_diff"):
+                    update_item_difficulty(options[pick], new_diff)
+                    st.success("更新したわ")
+                    st.rerun()
+
+                st.subheader("メニューを削除")
+                key = st.selectbox("消す料理を選ぶ", list(options.keys()), key="delete_target")
+                confirm = st.checkbox("本当に削除する", key="delete_confirm")
+                if st.button("削除する", key="btn_delete"):
                     if not confirm:
                         st.warning("確認にチェックを入れてください")
                     else:
