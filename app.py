@@ -397,6 +397,46 @@ bootstrap_db_sqlite()
 ensure_db()
 
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
+
+# ★★★ ここから：ガチャボタンを目立たせるCSS ★★★
+st.markdown(
+    """
+<style>
+/* ガチャ！ボタンをでかく・太く・目立たせる */
+div[data-testid="stButton"] > button[kind="primary"]{
+  width: 100%;
+  padding: 0.95rem 1.2rem;
+  border-radius: 16px;
+  font-weight: 800;
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+  box-shadow: 0 10px 22px rgba(0,0,0,0.18);
+  border: 1px solid rgba(255,255,255,0.25);
+  transform: translateY(0);
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+
+/* ホバー/押下の気持ちよさ */
+div[data-testid="stButton"] > button[kind="primary"]:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(0,0,0,0.22);
+  filter: brightness(1.03);
+}
+div[data-testid="stButton"] > button[kind="primary"]:active{
+  transform: translateY(1px);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.18);
+}
+
+/* 「ガチャ」セクションの余白を少しだけ整える */
+section.main .block-container{
+  padding-top: 1.4rem;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+# ★★★ ここまで ★★★
+
 st.title("🍚 献立ガチャ")
 
 items = load_items()
@@ -429,7 +469,8 @@ counts = {
     "果物": int(n_fruit),
 }
 
-if st.button("ガチャ！"):
+# ★ここを差し替え：primary + full width
+if st.button("ガチャ！", type="primary", use_container_width=True):
     selection, score = generate_menu(items, preferred, counts, (diff_min, diff_max))
     if not selection:
         st.error("その条件を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
@@ -505,7 +546,6 @@ with st.expander("入力フォームを開く", expanded=True):
                 st.success("追加しました")
                 st.rerun()
             except Exception as e:
-                # sqlite: IntegrityError / postgres: UniqueViolation などをまとめて扱う
                 st.error("同じ名前がもうあるか、DBエラーが出たみたい。別名にしてみて")
                 st.caption(str(e)[:200])
 
@@ -545,7 +585,7 @@ else:
     # 管理（難易度編集 & 削除）
     with st.expander("管理（難易度編集・削除）", expanded=False):
         if not ADMIN_KEY:
-            st.caption("ADMIN_KEY が未設定だから管理はロック中ニャ")
+            st.caption("ADMIN_KEY が未設定だから管理はロック中")
         else:
             admin_key_input = st.text_input("管理キー", type="password", key="admin_key_input")
             if admin_key_input != ADMIN_KEY:
