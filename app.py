@@ -320,9 +320,9 @@ def score_selection(
     target_dish_count: int,
 ) -> int:
     score = 0
-    items = [it for it, _ in selection]
+    items2 = [it for it, _ in selection]
 
-    genres = [x.genre for x in items]
+    genres = [x.genre for x in items2]
     if genres:
         base = genres[0]
         same = sum(1 for g in genres if g == base)
@@ -333,10 +333,10 @@ def score_selection(
             score -= (len(genres) - same)
 
     if preferred_genre and preferred_genre != "自動":
-        hit = sum(1 for x in items if x.genre == preferred_genre)
+        hit = sum(1 for x in items2 if x.genre == preferred_genre)
         score += 2 * hit
 
-    score -= max(0, len(items) - target_dish_count)
+    score -= max(0, len(items2) - target_dish_count)
     return score
 
 
@@ -381,6 +381,11 @@ def generate_candidates(
     """
     候補をたくさん作って返す（スコア付き）。
     返り値: [(selection, score, signature, ids), ...] score降順
+
+    ★要点：
+      RoleOption が複数グループを持つ場合でも、
+      「要求数を超えるグループが出ない」ようにする。
+      つまり、選ぶ RoleOption の groups が、すべて remaining に残ってるときだけ許可する。
     """
     dmin, dmax = difficulty_range
 
@@ -395,7 +400,7 @@ def generate_candidates(
     unique: Dict[str, Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]] = {}
 
     for _ in range(tries):
-        remaining = needed[:]
+        remaining = needed[:]          # ここが「まだ必要な枠」のマルチセット
         chosen_ids = set()
         selection: List[Tuple[MenuItem, RoleOption]] = []
 
@@ -424,10 +429,19 @@ def generate_candidates(
                     genre_bonus = 1.18 if it.genre == base_genre else 0.96
 
                 for opt in it.role_options:
-                    if target in opt.groups:
-                        cover = sum(1 for gg in opt.groups if gg in remaining)
-                        w = opt.weight * genre_bonus * (1.0 + 0.6 * max(0, cover - 1))
-                        cands.append((it, opt, w))
+                    if target not in opt.groups:
+                        continue
+
+                    # ★過剰カバー禁止：
+                    # その opt が持つ groups のどれかが remaining に無いなら、
+                    # それは「要求数を超える」ので候補から外す。
+                    # 例: remaining=["主食"] のとき opt.groups=["主菜","主食"] はNG
+                    if any(gg not in remaining for gg in opt.groups):
+                        continue
+
+                    cover = sum(1 for gg in opt.groups if gg in remaining)
+                    w = opt.weight * genre_bonus * (1.0 + 0.6 * max(0, cover - 1))
+                    cands.append((it, opt, w))
 
             if not cands:
                 selection = []
@@ -453,9 +467,9 @@ def generate_candidates(
         if (prev is None) or (s > prev[1]):
             unique[sig] = (selection, s, sig, ids)
 
-    cands = list(unique.values())
-    cands.sort(key=lambda x: x[1], reverse=True)
-    return cands[:keep]
+    cands2 = list(unique.values())
+    cands2.sort(key=lambda x: x[1], reverse=True)
+    return cands2[:keep]
 
 
 def pick_menu_from_candidates(
@@ -532,9 +546,9 @@ def item_any_groups(it: MenuItem) -> List[str]:
     return sorted(gset, key=lambda x: GROUPS.index(x) if x in GROUPS else 999)
 
 
-def build_rows(items: List[MenuItem]) -> List[Dict[str, str]]:
+def build_rows(items3: List[MenuItem]) -> List[Dict[str, str]]:
     rows = []
-    for it in items:
+    for it in items3:
         patterns = [f"{'・'.join(opt.groups)}(w={opt.weight})" for opt in it.role_options]
         rows.append(
             {
@@ -549,19 +563,19 @@ def build_rows(items: List[MenuItem]) -> List[Dict[str, str]]:
     return rows
 
 
-def sort_items(items: List[MenuItem], sort_key: str, asc: bool) -> List[MenuItem]:
+def sort_items(items4: List[MenuItem], sort_key: str, asc: bool) -> List[MenuItem]:
     reverse = not asc
     if sort_key == "新しい順":
-        return sorted(items, key=lambda x: x.id, reverse=reverse)
+        return sorted(items4, key=lambda x: x.id, reverse=reverse)
     if sort_key == "料理名":
-        return sorted(items, key=lambda x: x.name.lower(), reverse=reverse)
+        return sorted(items4, key=lambda x: x.name.lower(), reverse=reverse)
     if sort_key == "ジャンル":
-        return sorted(items, key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999, reverse=reverse)
+        return sorted(items4, key=lambda x: GENRES.index(x.genre) if x.genre in GENRES else 999, reverse=reverse)
     if sort_key == "役割の数":
-        return sorted(items, key=lambda x: len(item_any_groups(x)), reverse=reverse)
+        return sorted(items4, key=lambda x: len(item_any_groups(x)), reverse=reverse)
     if sort_key == "面倒くささ":
-        return sorted(items, key=lambda x: int(x.difficulty), reverse=reverse)
-    return items
+        return sorted(items4, key=lambda x: int(x.difficulty), reverse=reverse)
+    return items4
 
 
 # -----------------------------
@@ -953,3 +967,27 @@ with tab_edit:
                             delete_item_by_id(options[key])
                             st.success("消しました")
                             st.rerun()
+
+# --- AdSense loader を末尾に挿す（表示は別。Auto Ads/広告ユニット次第） ---
+def inject_adsense_loader() -> None:
+    client = "ca-pub-7509482435345963"
+    js = f"""
+    <script>
+    (function() {{
+      const d = window.parent.document;
+      const id = "adsense-loader-{client}";
+      if (d.getElementById(id)) return;  // rerunで二重に入れない
+
+      const s = d.createElement("script");
+      s.id = id;
+      s.async = true;
+      s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={client}";
+      s.crossOrigin = "anonymous";
+
+      (d.body || d.documentElement).appendChild(s);  // 「末尾でいい」→ body末尾へ
+    }})();
+    </script>
+    """
+    components.html(js, height=0)
+
+inject_adsense_loader()
