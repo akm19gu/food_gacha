@@ -618,6 +618,10 @@ hr{
   border: 0;
   border-top: 1px solid rgba(140,140,140,0.35);
 }
+/* ガチャ領域と下の編集領域の“間”を常に確保 */
+.section-gap{
+  height: 1.4rem;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -628,279 +632,279 @@ st.title("🍚 献立ガチャ")
 
 items = load_items()
 
-# 1) ガチャ（最上段）
-st.header("🎲 今日の献立を引く")
+tab_gacha, tab_edit = st.tabs(["🎲 ガチャ", "🛠 登録・編集"])
 
-# ジャンルの気分（ボタン式）
-if "genre_choice" not in st.session_state:
-    st.session_state.genre_choice = "自動"
+# =============================
+# タブ1: ガチャ
+# =============================
+with tab_gacha:
+    st.header("🎲 今日の献立を引く")
 
-st.write("ジャンルの気分（押さなければ自動）")
-g1, g2, g3, g4, g5 = st.columns(5)
+    # ジャンルの気分（ボタン式）
+    if "genre_choice" not in st.session_state:
+        st.session_state.genre_choice = "自動"
 
-if g1.button("自動", key="btn_genre_auto", use_container_width=True):
-    st.session_state.genre_choice = "自動"
-if g2.button("和食", key="btn_genre_wa", use_container_width=True):
-    st.session_state.genre_choice = "和"
-if g3.button("洋食", key="btn_genre_yo", use_container_width=True):
-    st.session_state.genre_choice = "洋"
-if g4.button("中華", key="btn_genre_chu", use_container_width=True):
-    st.session_state.genre_choice = "中"
-if g5.button("その他", key="btn_genre_other", use_container_width=True):
-    st.session_state.genre_choice = "その他"
+    st.write("ジャンルの気分（押さなければ自動）")
+    g1, g2, g3, g4, g5 = st.columns(5)
 
+    if g1.button("自動", key="btn_genre_auto", use_container_width=True):
+        st.session_state.genre_choice = "自動"
+    if g2.button("和食", key="btn_genre_wa", use_container_width=True):
+        st.session_state.genre_choice = "和"
+    if g3.button("洋食", key="btn_genre_yo", use_container_width=True):
+        st.session_state.genre_choice = "洋"
+    if g4.button("中華", key="btn_genre_chu", use_container_width=True):
+        st.session_state.genre_choice = "中"
+    if g5.button("その他", key="btn_genre_other", use_container_width=True):
+        st.session_state.genre_choice = "その他"
 
-st.caption(f"いま: {st.session_state.genre_choice}")
+    st.caption(f"いま: {st.session_state.genre_choice}")
+    preferred = st.session_state.genre_choice
 
-preferred = st.session_state.genre_choice
-
-# 面倒くささの気分（ボタン式）
-if "difficulty_preset" not in st.session_state:
-    st.session_state.difficulty_preset = None
-
-st.write("面倒くささの気分（押さなければ自動）")
-b1, b2, b3, b4 = st.columns(4)
-if b1.button("レンチンばんざい", key="btn_preset_microwave", use_container_width=True):
-    st.session_state.difficulty_preset = "microwave"
-if b2.button("いつものごはん", key="btn_preset_usual", use_container_width=True):
-    st.session_state.difficulty_preset = "usual"
-if b3.button("ごうかなディナー", key="btn_preset_deluxe", use_container_width=True):
-    st.session_state.difficulty_preset = "deluxe"
-if b4.button("シェフのおまかせコース", key="btn_preset_chef", use_container_width=True):
-    st.session_state.difficulty_preset = "chef"
-
-label = {
-    None: "自動（1〜5）",
-    "microwave": "レンチンばんざい（1のみ）",
-    "usual": "いつものごはん（2〜3）",
-    "deluxe": "ごうかなディナー（2〜4）",
-    "chef": "シェフのおまかせコース（2〜5）",
-}
-st.caption(f"いま: {label.get(st.session_state.difficulty_preset)}")
-
-# 戻す手段（押しっぱなしで固定化したくない時用）
-if st.session_state.difficulty_preset is not None:
-    if st.button("自動に戻す", key="btn_preset_reset"):
+    # 面倒くささの気分（ボタン式）
+    if "difficulty_preset" not in st.session_state:
         st.session_state.difficulty_preset = None
-        st.rerun()
 
-difficulty_range, pick_mode = resolve_difficulty_preset(st.session_state.difficulty_preset)
+    st.write("面倒くささの気分（押さなければ自動）")
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button("レンチンばんざい", key="btn_preset_microwave", use_container_width=True):
+        st.session_state.difficulty_preset = "microwave"
+    if b2.button("いつものごはん", key="btn_preset_usual", use_container_width=True):
+        st.session_state.difficulty_preset = "usual"
+    if b3.button("ごうかなディナー", key="btn_preset_deluxe", use_container_width=True):
+        st.session_state.difficulty_preset = "deluxe"
+    if b4.button("シェフのおまかせコース", key="btn_preset_chef", use_container_width=True):
+        st.session_state.difficulty_preset = "chef"
 
-st.write("品数（基本は全部1。0にするとその枠は無し）")
-cA, cB, cC, cD, cE = st.columns(5)
-n_shushoku = cA.selectbox("主食", [0, 1, 2, 3], index=1)
-n_shusai = cB.selectbox("主菜", [0, 1, 2, 3], index=1)
-n_fukusai = cC.selectbox("副菜", [0, 1, 2, 3], index=1)
-n_milk = cD.selectbox("乳製品", [0, 1, 2, 3], index=0)
-n_fruit = cE.selectbox("果物", [0, 1, 2, 3], index=0)
+    label = {
+        None: "自動（1〜5）",
+        "microwave": "レンチンばんざい（1のみ）",
+        "usual": "いつものごはん（2〜3）",
+        "deluxe": "ごうかなディナー（2〜4）",
+        "chef": "シェフのおまかせコース（2〜5）",
+    }
+    st.caption(f"いま: {label.get(st.session_state.difficulty_preset)}")
 
-counts = {
-    "主食": int(n_shushoku),
-    "主菜": int(n_shusai),
-    "副菜": int(n_fukusai),
-    "乳製品": int(n_milk),
-    "果物": int(n_fruit),
-}
+    # 戻す手段
+    if st.session_state.difficulty_preset is not None:
+        if st.button("自動に戻す", key="btn_preset_reset"):
+            st.session_state.difficulty_preset = None
+            st.rerun()
 
-if "recent_menu_sigs" not in st.session_state:
-    st.session_state.recent_menu_sigs = []
-if "last_menu_ids" not in st.session_state:
-    st.session_state.last_menu_ids = []
+    difficulty_range, pick_mode = resolve_difficulty_preset(st.session_state.difficulty_preset)
 
-# ★ここ：primary + full width + ボタン気分 + 似通い回避 + 自動ジャンルは統一（その他は混ぜOK）
-if st.button("ガチャ！", type="primary", use_container_width=True):
-    base_genre = None
-    if preferred == "自動":
-        bases = feasible_auto_base_genres(items, counts, difficulty_range)
-        if bases:
-            base_genre = random.choice(bases)
+    st.write("品数（基本は全部1。0にするとその枠は無し）")
+    cA, cB, cC, cD, cE = st.columns(5)
+    n_shushoku = cA.selectbox("主食", [0, 1, 2, 3], index=1)
+    n_shusai = cB.selectbox("主菜", [0, 1, 2, 3], index=1)
+    n_fukusai = cC.selectbox("副菜", [0, 1, 2, 3], index=1)
+    n_milk = cD.selectbox("乳製品", [0, 1, 2, 3], index=0)
+    n_fruit = cE.selectbox("果物", [0, 1, 2, 3], index=0)
+
+    counts = {
+        "主食": int(n_shushoku),
+        "主菜": int(n_shusai),
+        "副菜": int(n_fukusai),
+        "乳製品": int(n_milk),
+        "果物": int(n_fruit),
+    }
+
+    if "recent_menu_sigs" not in st.session_state:
+        st.session_state.recent_menu_sigs = []
+    if "last_menu_ids" not in st.session_state:
+        st.session_state.last_menu_ids = []
+
+    if st.button("ガチャ！", type="primary", use_container_width=True):
+        base_genre = None
+        if preferred == "自動":
+            bases = feasible_auto_base_genres(items, counts, difficulty_range)
+            if bases:
+                base_genre = random.choice(bases)
+            else:
+                if any(it.genre != "その他" for it in items):
+                    st.error("自動ジャンルで揃えられる候補が足りない（和/洋/中のどれか + その他 で組めるように登録を増やして）")
+                    st.stop()
+
+        candidates = generate_candidates(
+            items,
+            preferred,
+            counts,
+            difficulty_range,
+            base_genre=base_genre,
+        )
+
+        selection, score, sig, ids = pick_menu_from_candidates(
+            candidates,
+            pick_mode=pick_mode,
+            recent_signatures=st.session_state.recent_menu_sigs,
+            last_ids=st.session_state.last_menu_ids,
+        )
+
+        if not selection:
+            st.error("その条件を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
         else:
-            # 「その他」しか無いならOK。それ以外があるのに bases が空なら不足
-            if any(it.genre != "その他" for it in items):
-                st.error("自動ジャンルで揃えられる候補が足りない（和/洋/中のどれか + その他 で組めるように登録を増やして）")
-                st.stop()
+            st.session_state.recent_menu_sigs = (st.session_state.recent_menu_sigs + [sig])[-8:]
+            st.session_state.last_menu_ids = ids
 
-    candidates = generate_candidates(
-        items,
-        preferred,
-        counts,
-        difficulty_range,
-        base_genre=base_genre,
-    )
+            auto_genre_line = ""
+            if preferred == "自動" and base_genre:
+                auto_genre_line = f"ジャンル: {html.escape(base_genre)}（自動 / その他は混ぜる）<br>"
 
-    selection, score, sig, ids = pick_menu_from_candidates(
-        candidates,
-        pick_mode=pick_mode,
-        recent_signatures=st.session_state.recent_menu_sigs,
-        last_ids=st.session_state.last_menu_ids,
-    )
+            lines = []
+            for it, opt in selection:
+                line = (
+                    f"・{html.escape(it.name)}"
+                    f"（{html.escape(it.genre)} / 面倒くささ:{int(it.difficulty)} / 役割: {'・'.join(html.escape(x) for x in opt.groups)}）"
+                )
+                lines.append(f"<div class='result-item'>{line}</div>")
 
-    if not selection:
-        st.error("その条件を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
-    else:
-        # 履歴更新（直近8回ぶん）
-        st.session_state.recent_menu_sigs = (st.session_state.recent_menu_sigs + [sig])[-8:]
-        st.session_state.last_menu_ids = ids
-
-        # ここから結果表示（カード）
-        auto_genre_line = ""
-        if preferred == "自動" and base_genre:
-            auto_genre_line = f"ジャンル: {html.escape(base_genre)}（自動 / その他は混ぜる）<br>"
-
-        lines = []
-        for it, opt in selection:
-            line = (
-                f"・{html.escape(it.name)}"
-                f"（{html.escape(it.genre)} / 面倒くささ:{int(it.difficulty)} / 役割: {'・'.join(html.escape(x) for x in opt.groups)}）"
-            )
-            lines.append(f"<div class='result-item'>{line}</div>")
-
-        st.markdown(
-            f"""
+            st.markdown(
+                f"""
 <div class="result-card">
   <div class="result-title">今日の献立</div>
   <div class="result-meta">{auto_genre_line}スコア: {int(score)}</div>
   {''.join(lines)}
 </div>
 """,
-            unsafe_allow_html=True,
-        )
+                unsafe_allow_html=True,
+            )
 
+# =============================
+# タブ2: 登録・編集
+# =============================
+with tab_edit:
+    st.header("➕ メニューを追加")
 
+    if "role_opts" not in st.session_state:
+        st.session_state.role_opts = []
 
-# 2) メニュー追加（中段）
-st.header("➕ メニューを追加")
+    with st.expander("入力フォームを開く", expanded=True):
+        c1, c2 = st.columns(2)
+        name = c1.text_input("料理名", placeholder="例：チャーハン")
+        genre = c2.selectbox("ジャンル", GENRES, index=0, key="add_genre")
 
-if "role_opts" not in st.session_state:
-    st.session_state.role_opts = []
+        st.write("役割パターンを追加して。1品が複数グループを兼ねてもOK。")
+        cc1, cc2 = st.columns(2)
+        gsel = cc1.multiselect("このパターンのグループ", GROUPS, default=[], key="add_groups")
+        w = cc2.number_input("このパターンの出やすさ（重み）", min_value=0.1, value=1.0, step=0.1, key="add_weight")
 
-with st.expander("入力フォームを開く", expanded=True):
-    c1, c2 = st.columns(2)
-    name = c1.text_input("料理名", placeholder="例：チャーハン")
-    genre = c2.selectbox("ジャンル", GENRES, index=0, key="add_genre")
-
-    st.write("役割パターンを追加して。1品が複数グループを兼ねてもOK。")
-    cc1, cc2 = st.columns(2)
-    gsel = cc1.multiselect("このパターンのグループ", GROUPS, default=[], key="add_groups")
-    w = cc2.number_input("このパターンの出やすさ（重み）", min_value=0.1, value=1.0, step=0.1, key="add_weight")
-
-    if st.button("この役割パターンを追加", key="btn_add_roleopt"):
-        if gsel:
-            st.session_state.role_opts.append(RoleOption(groups=gsel, weight=float(w)))
-        else:
-            st.warning("グループを1つは選んでニャ")
-
-    if st.session_state.role_opts:
-        st.write("いまの役割パターン")
-        for i, opt in enumerate(st.session_state.role_opts):
-            st.write(f"・{i+1}: {' / '.join(opt.groups)}  重み={opt.weight}")
-        if st.button("役割パターンを全部クリア", key="btn_clear_roleopt"):
-            st.session_state.role_opts = []
-
-    difficulty = st.selectbox(
-        "面倒くささ（1=冷食〜5=コース料理）",
-        [1, 2, 3, 4, 5],
-        index=2,
-        format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
-        key="add_difficulty",
-    )
-
-    # --- 追加キーを「保存ボタンの直前」に配置 ---
-    can_add = True
-    if ADD_KEY:
-        add_key_input = st.text_input(
-            "追加キー（知ってる人だけ保存できる）",
-            type="password",
-            key="add_key_input_in_add_form",
-        )
-        can_add = (add_key_input == ADD_KEY)
-        if add_key_input and not can_add:
-            st.warning("追加キーが違うニャ")
-    else:
-        st.caption("※ ADD_KEY 未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
-
-    save_disabled = not can_add
-    if st.button("このメニューを保存", disabled=save_disabled, key="btn_save_item"):
-        if not name.strip():
-            st.warning("料理名が空っぽ")
-        elif not st.session_state.role_opts:
-            st.warning("役割パターンがないと引けない")
-        else:
-            try:
-                insert_item(name.strip(), genre, int(difficulty), st.session_state.role_opts)
-                st.session_state.role_opts = []
-                st.success("追加しました")
-                st.rerun()
-            except Exception as e:
-                st.error("同じ名前がもうあるか、DBエラーが出たみたい。別名にしてみて")
-                st.caption(str(e)[:200])
-
-    if save_disabled:
-        st.caption("追加キーが合ってないと保存できないニャ")
-
-st.divider()
-
-# 3) 登録済みメニュー（下段：絞り込み+ソート、全部表示も可）
-st.header("📚 登録済みメニュー")
-
-if not items:
-    st.info("まずは ごはん(主食/和), 味噌汁(副菜/和), 生姜焼き(主菜/和) あたりを入れてみよう")
-else:
-    c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
-    view_mode = c1.selectbox("表示モード", ["絞り込み（おすすめ）", "全部表示"], index=0)
-
-    genre_filter = c2.selectbox("ジャンルで絞り込み", ["（指定なし）"] + GENRES, index=0)
-    group_filter = c3.selectbox("役割で絞り込み", ["（指定なし）"] + GROUPS, index=0)
-
-    cS1, cS2 = st.columns([1.4, 1.0])
-    sort_key = cS1.selectbox("ソート", ["新しい順", "料理名", "ジャンル", "役割の数", "面倒くささ"], index=0)
-    asc = (cS2.selectbox("順序", ["降順", "昇順"], index=0) == "昇順")
-
-    filtered = items[:]
-    if view_mode != "全部表示":
-        if genre_filter != "（指定なし）":
-            filtered = [it for it in filtered if it.genre == genre_filter]
-        if group_filter != "（指定なし）":
-            filtered = [it for it in filtered if item_can_cover_group(it, group_filter)]
-
-    filtered = sort_items(filtered, sort_key, asc)
-
-    st.caption(f"表示件数: {len(filtered)} / 全体: {len(items)}")
-    st.dataframe(build_rows(filtered), use_container_width=True, hide_index=True)
-
-    # 管理（難易度編集 & 削除）
-    with st.expander("管理（難易度編集・削除）", expanded=False):
-        if not ADMIN_KEY:
-            st.caption("ADMIN_KEY が未設定だから管理はロック中")
-        else:
-            admin_key_input = st.text_input("管理キー", type="password", key="admin_key_input")
-            if admin_key_input != ADMIN_KEY:
-                if admin_key_input:
-                    st.warning("管理キーが違うニャ")
-                st.caption("管理キーが合ってると編集・削除できるの")
+        if st.button("この役割パターンを追加", key="btn_add_roleopt"):
+            if gsel:
+                st.session_state.role_opts.append(RoleOption(groups=gsel, weight=float(w)))
             else:
-                st.subheader("難易度を編集")
-                options = {f"{it.id}: {it.name}（いま:{it.difficulty}）": it.id for it in items}
-                pick = st.selectbox("対象", list(options.keys()), key="diff_target")
-                new_diff = st.selectbox(
-                    "新しい面倒くささ",
-                    [1, 2, 3, 4, 5],
-                    index=2,
-                    format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
-                    key="diff_value",
-                )
-                if st.button("難易度を更新", key="btn_update_diff"):
-                    update_item_difficulty(options[pick], new_diff)
-                    st.success("更新したわ")
-                    st.rerun()
+                st.warning("グループを1つは選んでニャ")
 
-                st.subheader("メニューを削除")
-                key = st.selectbox("消す料理を選ぶ", list(options.keys()), key="delete_target")
-                confirm = st.checkbox("本当に削除する", key="delete_confirm")
-                if st.button("削除する", key="btn_delete"):
-                    if not confirm:
-                        st.warning("確認にチェックを入れてください")
-                    else:
-                        delete_item_by_id(options[key])
-                        st.success("消しました")
+        if st.session_state.role_opts:
+            st.write("いまの役割パターン")
+            for i, opt in enumerate(st.session_state.role_opts):
+                st.write(f"・{i+1}: {' / '.join(opt.groups)}  重み={opt.weight}")
+            if st.button("役割パターンを全部クリア", key="btn_clear_roleopt"):
+                st.session_state.role_opts = []
+
+        difficulty = st.selectbox(
+            "面倒くささ（1=冷食〜5=コース料理）",
+            [1, 2, 3, 4, 5],
+            index=2,
+            format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
+            key="add_difficulty",
+        )
+
+        can_add = True
+        if ADD_KEY:
+            add_key_input = st.text_input(
+                "追加キー（知ってる人だけ保存できる）",
+                type="password",
+                key="add_key_input_in_add_form",
+            )
+            can_add = (add_key_input == ADD_KEY)
+            if add_key_input and not can_add:
+                st.warning("追加キーが違うニャ")
+        else:
+            st.caption("※ ADD_KEY 未設定だから、いまは誰でも追加できる状態ニャ（リリース時は設定推奨）")
+
+        save_disabled = not can_add
+        if st.button("このメニューを保存", disabled=save_disabled, key="btn_save_item"):
+            if not name.strip():
+                st.warning("料理名が空っぽ")
+            elif not st.session_state.role_opts:
+                st.warning("役割パターンがないと引けない")
+            else:
+                try:
+                    insert_item(name.strip(), genre, int(difficulty), st.session_state.role_opts)
+                    st.session_state.role_opts = []
+                    st.success("追加しました")
+                    st.rerun()
+                except Exception as e:
+                    st.error("同じ名前がもうあるか、DBエラーが出たみたい。別名にしてみて")
+                    st.caption(str(e)[:200])
+
+        if save_disabled:
+            st.caption("追加キーが合ってないと保存できないニャ")
+
+    st.divider()
+
+    st.header("📚 登録済みメニュー")
+
+    # タブ切替中に items が古く見えたら嫌なので、ここで再ロードしてもいい
+    # items = load_items()
+
+    if not items:
+        st.info("まずは ごはん(主食/和), 味噌汁(副菜/和), 生姜焼き(主菜/和) あたりを入れてみよう")
+    else:
+        c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
+        view_mode = c1.selectbox("表示モード", ["絞り込み（おすすめ）", "全部表示"], index=0)
+
+        genre_filter = c2.selectbox("ジャンルで絞り込み", ["（指定なし）"] + GENRES, index=0)
+        group_filter = c3.selectbox("役割で絞り込み", ["（指定なし）"] + GROUPS, index=0)
+
+        cS1, cS2 = st.columns([1.4, 1.0])
+        sort_key = cS1.selectbox("ソート", ["新しい順", "料理名", "ジャンル", "役割の数", "面倒くささ"], index=0)
+        asc = (cS2.selectbox("順序", ["降順", "昇順"], index=0) == "昇順")
+
+        filtered = items[:]
+        if view_mode != "全部表示":
+            if genre_filter != "（指定なし）":
+                filtered = [it for it in filtered if it.genre == genre_filter]
+            if group_filter != "（指定なし）":
+                filtered = [it for it in filtered if item_can_cover_group(it, group_filter)]
+
+        filtered = sort_items(filtered, sort_key, asc)
+
+        st.caption(f"表示件数: {len(filtered)} / 全体: {len(items)}")
+        st.dataframe(build_rows(filtered), use_container_width=True, hide_index=True)
+
+        with st.expander("管理（難易度編集・削除）", expanded=False):
+            if not ADMIN_KEY:
+                st.caption("ADMIN_KEY が未設定だから管理はロック中")
+            else:
+                admin_key_input = st.text_input("管理キー", type="password", key="admin_key_input")
+                if admin_key_input != ADMIN_KEY:
+                    if admin_key_input:
+                        st.warning("管理キーが違うニャ")
+                    st.caption("管理キーが合ってると編集・削除できるの")
+                else:
+                    st.subheader("難易度を編集")
+                    options = {f"{it.id}: {it.name}（いま:{it.difficulty}）": it.id for it in items}
+                    pick = st.selectbox("対象", list(options.keys()), key="diff_target")
+                    new_diff = st.selectbox(
+                        "新しい面倒くささ",
+                        [1, 2, 3, 4, 5],
+                        index=2,
+                        format_func=lambda x: f"{x}: {DIFFICULTY_LABELS.get(x, '')}",
+                        key="diff_value",
+                    )
+                    if st.button("難易度を更新", key="btn_update_diff"):
+                        update_item_difficulty(options[pick], new_diff)
+                        st.success("更新したわ")
                         st.rerun()
+
+                    st.subheader("メニューを削除")
+                    key = st.selectbox("消す料理を選ぶ", list(options.keys()), key="delete_target")
+                    confirm = st.checkbox("本当に削除する", key="delete_confirm")
+                    if st.button("削除する", key="btn_delete"):
+                        if not confirm:
+                            st.warning("確認にチェックを入れてください")
+                        else:
+                            delete_item_by_id(options[key])
+                            st.success("消しました")
+                            st.rerun()
