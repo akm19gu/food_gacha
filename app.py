@@ -187,7 +187,7 @@ def ensure_db():
     con.close()
 
 
-def load_items() -> List[MenuItem]:
+def _load_items_from_db() -> List[MenuItem]:
     con = db()
     cur = con.cursor()
 
@@ -221,6 +221,12 @@ def load_items() -> List[MenuItem]:
             )
 
     return [x for x in items.values() if x.role_options]
+
+
+@st.cache_data(show_spinner=False)
+def load_items_cached(items_ver: int) -> List[MenuItem]:
+    # items_verが変わったら自動で無効化される
+    return _load_items_from_db()
 
 
 def insert_item(name: str, genre: str, difficulty: int, role_options: List[RoleOption]) -> None:
@@ -347,17 +353,17 @@ def _genre_policy(preferred_genre: Optional[str], base_genre: Optional[str]) -> 
     if preferred_genre == "和":
         allowed = {"和", "中", "その他"}
         # 和はしっかり寄せつつ、中も少しだけ通す
-        bonus = {"和": 1.32, "中": 1.10, "その他": 0.95}
+        bonus = {"和": 1.32, "中": 0.70, "その他": 0.30}
         return allowed, bonus
 
     if preferred_genre == "洋":
         allowed = {"洋", "その他"}
-        bonus = {"洋": 1.28, "その他": 0.95}
+        bonus = {"洋": 1.28, "その他": 0.30}
         return allowed, bonus
 
     if preferred_genre == "中":
         allowed = {"中", "その他"}
-        bonus = {"中": 1.28, "その他": 0.95}
+        bonus = {"中": 1.28, "その他": 0.30}
         return allowed, bonus
 
     if preferred_genre == "その他":
@@ -607,7 +613,7 @@ def item_any_groups(it: MenuItem) -> List[str]:
     return sorted(gset, key=lambda x: GROUPS.index(x) if x in GROUPS else 999)
 
 
-def build_rows(items3: List[MenuItem]) -> List[Dict[str, str]]:
+def _build_rows_uncached(items3: List[MenuItem]) -> List[Dict[str, str]]:
     rows = []
     for it in items3:
         patterns = [f"{'・'.join(opt.groups)}(w={opt.weight})" for opt in it.role_options]
@@ -622,6 +628,17 @@ def build_rows(items3: List[MenuItem]) -> List[Dict[str, str]]:
             }
         )
     return rows
+
+
+@st.cache_data(show_spinner=False)
+def build_rows_cached(items_ver: int, item_ids_sig: str) -> List[Dict[str, str]]:
+    # items_verが変わったら自動で無効化される
+    # item_ids_sigは「いま表示対象のitemsが何か」を表すためのキー（内容に依存せず軽い）
+    _ = item_ids_sig
+    items_now = load_items_cached(items_ver)
+    idset = set(int(x) for x in item_ids_sig.split("-") if x)
+    filtered_items = [it for it in items_now if int(it.id) in idset]
+    return _build_rows_uncached(filtered_items)
 
 
 def sort_items(items4: List[MenuItem], sort_key: str, asc: bool) -> List[MenuItem]:
@@ -639,11 +656,47 @@ def sort_items(items4: List[MenuItem], sort_key: str, asc: bool) -> List[MenuIte
     return items4
 
 
+# --- AdSense loader を末尾に挿す（表示は別。Auto Ads/広告ユニット次第） ---
+def inject_adsense_loader() -> None:
+    # セッション中1回だけでOK（rerun対策）
+    if st.session_state.get("_ads_loaded"):
+        return
+
+    client = "ca-pub-7509482435345963"
+    js = f"""
+    <script>
+    (function() {{
+      const d = window.parent.document;
+      const id = "adsense-loader-{client}";
+      if (d.getElementById(id)) return;  // rerunで二重に入れない
+
+      const s = d.createElement("script");
+      s.id = id;
+      s.async = true;
+      s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={client}";
+      s.crossOrigin = "anonymous";
+
+      (d.body || d.documentElement).appendChild(s);  // 「末尾でいい」→ body末尾へ
+    }})();
+    </script>
+    """
+    components.html(js, height=0)
+    st.session_state["_ads_loaded"] = True
+
+
 # -----------------------------
 # UI
 # -----------------------------
 bootstrap_db_sqlite()
-ensure_db()
+
+# DB初期化（DDL）はセッション中1回だけ
+if "_db_ready" not in st.session_state:
+    ensure_db()
+    st.session_state["_db_ready"] = True
+
+# itemsキャッシュの世代
+if "items_ver" not in st.session_state:
+    st.session_state["items_ver"] = 0
 
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
 
@@ -730,7 +783,7 @@ hr{
 
 st.title("🍚 献立ガチャ")
 
-items = load_items()
+items = load_items_cached(st.session_state["items_ver"])
 tab_gacha, tab_edit = st.tabs(["🎲 ガチャ", "🛠 登録・編集"])
 
 # =============================
@@ -956,6 +1009,8 @@ with tab_edit:
                 try:
                     insert_item(name.strip(), genre, int(difficulty), st.session_state.role_opts)
                     st.session_state.role_opts = []
+                    # 追加でDB内容が変わるのでキャッシュ世代を進める
+                    st.session_state["items_ver"] += 1
                     st.success("追加しました")
                     st.rerun()
                 except Exception as e:
@@ -967,6 +1022,9 @@ with tab_edit:
 
     st.divider()
     st.header("📚 登録済みメニュー")
+
+    # itemsはキャッシュから来るので、ここで最新を取り直す（世代が変わった場合に追従）
+    items = load_items_cached(st.session_state["items_ver"])
 
     if not items:
         st.info("まずは ごはん(主食/和), 味噌汁(副菜/和), 生姜焼き(主菜/和) あたりを入れてみよう")
@@ -991,7 +1049,11 @@ with tab_edit:
         filtered = sort_items(filtered, sort_key, asc)
 
         st.caption(f"表示件数: {len(filtered)} / 全体: {len(items)}")
-        st.dataframe(build_rows(filtered), use_container_width=True, hide_index=True)
+
+        # build_rowsは整形コストが地味に重いので、対象IDの署名でキャッシュ
+        item_ids_sig = "-".join(str(int(it.id)) for it in filtered)
+        rows = build_rows_cached(st.session_state["items_ver"], item_ids_sig)
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
         with st.expander("管理（難易度編集・削除）", expanded=False):
             if not ADMIN_KEY:
@@ -1015,6 +1077,7 @@ with tab_edit:
                     )
                     if st.button("難易度を更新", key="btn_update_diff"):
                         update_item_difficulty(options[pick], new_diff)
+                        st.session_state["items_ver"] += 1
                         st.success("更新したわ")
                         st.rerun()
 
@@ -1026,29 +1089,8 @@ with tab_edit:
                             st.warning("確認にチェックを入れてください")
                         else:
                             delete_item_by_id(options[key])
+                            st.session_state["items_ver"] += 1
                             st.success("消しました")
                             st.rerun()
-
-# --- AdSense loader を末尾に挿す（表示は別。Auto Ads/広告ユニット次第） ---
-def inject_adsense_loader() -> None:
-    client = "ca-pub-7509482435345963"
-    js = f"""
-    <script>
-    (function() {{
-      const d = window.parent.document;
-      const id = "adsense-loader-{client}";
-      if (d.getElementById(id)) return;  // rerunで二重に入れない
-
-      const s = d.createElement("script");
-      s.id = id;
-      s.async = true;
-      s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={client}";
-      s.crossOrigin = "anonymous";
-
-      (d.body || d.documentElement).appendChild(s);  // 「末尾でいい」→ body末尾へ
-    }})();
-    </script>
-    """
-    components.html(js, height=0)
 
 inject_adsense_loader()
