@@ -658,7 +658,7 @@ def sort_items(items4: List[MenuItem], sort_key: str, asc: bool) -> List[MenuIte
 
 # --- AdSense loader を末尾に挿す（表示は別。Auto Ads/広告ユニット次第） ---
 def inject_adsense_loader() -> None:
-    # セッション中1回だけでOK（rerun対策）
+    # セッション中1回だけ（rerun対策）
     if st.session_state.get("_ads_loaded"):
         return
 
@@ -668,7 +668,9 @@ def inject_adsense_loader() -> None:
     (function() {{
       const d = window.parent.document;
       const id = "adsense-loader-{client}";
-      if (d.getElementById(id)) return;  // rerunで二重に入れない
+
+      // 既に入ってたら何もしない
+      if (d.getElementById(id)) return;
 
       const s = d.createElement("script");
       s.id = id;
@@ -676,13 +678,17 @@ def inject_adsense_loader() -> None:
       s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={client}";
       s.crossOrigin = "anonymous";
 
-      (d.body || d.documentElement).appendChild(s);  // 「末尾でいい」→ body末尾へ
+      // ★ head に入れる
+      if (d.head) {{
+        d.head.appendChild(s);
+      }} else {{
+        (d.documentElement || d.body).appendChild(s);
+      }}
     }})();
     </script>
     """
     components.html(js, height=0)
     st.session_state["_ads_loaded"] = True
-
 
 # -----------------------------
 # UI
@@ -699,6 +705,7 @@ if "items_ver" not in st.session_state:
     st.session_state["items_ver"] = 0
 
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
+inject_adsense_loader()
 
 st.markdown(
     """
