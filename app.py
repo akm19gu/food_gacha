@@ -272,13 +272,47 @@ def score_selection(
     return score
 
 
-def generate_menu(
+def _selection_signature_and_ids(selection: List[Tuple[MenuItem, RoleOption]]) -> Tuple[str, List[int]]:
+    ids = sorted({int(it.id) for it, _ in selection})
+    sig = "-".join(str(x) for x in ids)
+    return sig, ids
+
+
+def resolve_difficulty_preset(preset: Optional[str]) -> Tuple[Tuple[int, int], str]:
+    """
+    preset:
+      None        -> 自動
+      microwave   -> レンチンばんざい
+      usual       -> いつものごはん
+      deluxe      -> ごうかなディナー
+      chef        -> シェフのおまかせコース
+
+    return:
+      difficulty_range, pick_mode
+    """
+    if preset == "microwave":
+        return (1, 1), "microwave"
+    if preset == "usual":
+        return (2, 3), "usual"
+    if preset == "deluxe":
+        return (2, 4), "deluxe"
+    if preset == "chef":
+        return (2, 5), "chef"
+    return (1, 5), "auto"
+
+
+def generate_candidates(
     items: List[MenuItem],
     preferred_genre: Optional[str],
     counts: Dict[str, int],
     difficulty_range: Tuple[int, int],
-    tries: int = 450,
-) -> Tuple[List[Tuple[MenuItem, RoleOption]], int]:
+    tries: int = 650,
+    keep: int = 260,
+) -> List[Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]]:
+    """
+    候補をたくさん作って返す（スコア付き）。
+    返り値: [(selection, score, signature, ids), ...] score降順
+    """
     dmin, dmax = difficulty_range
 
     needed: List[str] = []
@@ -286,9 +320,10 @@ def generate_menu(
         needed += [g] * max(0, int(counts.get(g, 0)))
 
     target_dish_count = sum(max(0, int(v)) for v in counts.values())
+    if target_dish_count <= 0:
+        return []
 
-    best: List[Tuple[MenuItem, RoleOption]] = []
-    best_score = -10**9
+    unique: Dict[str, Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]] = {}
 
     for _ in range(tries):
         remaining = needed[:]
@@ -314,7 +349,7 @@ def generate_menu(
 
                 for opt in it.role_options:
                     if target in opt.groups:
-                        cover = sum(1 for g in opt.groups if g in remaining)
+                        cover = sum(1 for gg in opt.groups if gg in remaining)
                         w = opt.weight * genre_bonus * (1.0 + 0.6 * max(0, cover - 1))
                         cands.append((it, opt, w))
 
@@ -326,9 +361,9 @@ def generate_menu(
             chosen_ids.add(it.id)
             selection.append((it, opt))
 
-            for g in opt.groups:
-                if g in remaining:
-                    remaining.remove(g)
+            for gg in opt.groups:
+                if gg in remaining:
+                    remaining.remove(gg)
 
         if not selection:
             continue
@@ -336,11 +371,80 @@ def generate_menu(
             continue
 
         s = score_selection(selection, preferred_genre, target_dish_count)
-        if s > best_score:
-            best_score = s
-            best = selection
+        sig, ids = _selection_signature_and_ids(selection)
 
-    return best, best_score
+        prev = unique.get(sig)
+        if (prev is None) or (s > prev[1]):
+            unique[sig] = (selection, s, sig, ids)
+
+    cands = list(unique.values())
+    cands.sort(key=lambda x: x[1], reverse=True)
+    return cands[:keep]
+
+
+def pick_menu_from_candidates(
+    candidates: List[Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]],
+    pick_mode: str,
+    recent_signatures: List[str],
+    last_ids: List[int],
+) -> Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]:
+    """
+    pick_mode:
+      auto      -> だいたい高スコア寄り（従来寄せ）
+      microwave -> スコア偏らせない（1のみ）
+      usual     -> スコア偏らせない（2-3）
+      deluxe    -> やや高スコア優先（2-4）
+      chef      -> 高スコア優先（2-5）
+
+    直近の完全一致(sig)と、直近セット(last_ids)への類似度にペナルティを掛けて、同じが続きにくい。
+    """
+    if not candidates:
+        return [], -10**9, "", []
+
+    # 高スコア系は上位寄りのプールから選ぶ（ただし固定化しないよう重み+ペナルティ）
+    if pick_mode in ("auto", "deluxe", "chef"):
+        pool = candidates[:90]
+    else:
+        pool = candidates[:]  # まんべんなく
+
+    scores = [s for _sel, s, _sig, _ids in pool]
+    min_s, max_s = min(scores), max(scores)
+    denom = (max_s - min_s) if (max_s != min_s) else 1.0
+
+    recent_set = set(recent_signatures or [])
+    last_set = set(int(x) for x in (last_ids or []))
+
+    weights: List[float] = []
+    for sel, s, sig, ids in pool:
+        # スコア重み（モードによって強さを変える）
+        t = (s - min_s) / denom  # 0..1
+        w = 1.0
+
+        if pick_mode == "deluxe":
+            w *= 0.7 + 2.6 * (t ** 2)
+        elif pick_mode == "chef":
+            w *= 0.25 + 4.5 * (t ** 4)
+        elif pick_mode == "auto":
+            w *= 0.45 + 3.4 * (t ** 3)
+        else:
+            # usual / microwave はスコア偏らせない
+            w *= 1.0
+
+        # 直近完全一致は強めに抑える
+        if sig in recent_set:
+            w *= 0.03
+
+        # 直近セットに似すぎるのも抑える（似通い対策）
+        if last_set:
+            ids_set = set(int(x) for x in ids)
+            overlap = len(ids_set & last_set) / max(1, len(ids_set | last_set))  # 0..1
+            w *= max(0.06, 1.0 - 0.82 * overlap)
+
+        weights.append(max(1e-6, w))
+
+    idx = random.choices(range(len(pool)), weights=weights, k=1)[0]
+    return pool[idx]
+
 
 
 # -----------------------------
@@ -446,12 +550,38 @@ st.header("🎲 今日の献立を引く")
 
 preferred = st.selectbox("ジャンルの気分", ["自動"] + GENRES, index=0)
 
-diff_min, diff_max = st.slider(
-    "面倒くささの気分（範囲）",
-    min_value=1,
-    max_value=5,
-    value=(1, 5),
-)
+# 面倒くささの気分（ボタン式）
+if "difficulty_preset" not in st.session_state:
+    st.session_state.difficulty_preset = None
+
+st.write("面倒くささの気分（押さなければ自動）")
+b1, b2, b3, b4 = st.columns(4)
+if b1.button("レンチンばんざい", key="btn_preset_microwave"):
+    st.session_state.difficulty_preset = "microwave"
+if b2.button("いつものごはん", key="btn_preset_usual"):
+    st.session_state.difficulty_preset = "usual"
+if b3.button("ごうかなディナー", key="btn_preset_deluxe"):
+    st.session_state.difficulty_preset = "deluxe"
+if b4.button("シェフのおまかせコース", key="btn_preset_chef"):
+    st.session_state.difficulty_preset = "chef"
+
+label = {
+    None: "自動（1〜5）",
+    "microwave": "レンチンばんざい（1のみ）",
+    "usual": "いつものごはん（2〜3）",
+    "deluxe": "ごうかなディナー（2〜4）",
+    "chef": "シェフのおまかせコース（2〜5）",
+}
+st.caption(f"いま: {label.get(st.session_state.difficulty_preset)}")
+
+# 戻す手段（押しっぱなしで固定化したくない時用）
+if st.session_state.difficulty_preset is not None:
+    if st.button("自動に戻す", key="btn_preset_reset"):
+        st.session_state.difficulty_preset = None
+        st.rerun()
+
+difficulty_range, pick_mode = resolve_difficulty_preset(st.session_state.difficulty_preset)
+
 
 st.write("品数（基本は全部1。0にするとその枠は無し）")
 cA, cB, cC, cD, cE = st.columns(5)
@@ -469,18 +599,34 @@ counts = {
     "果物": int(n_fruit),
 }
 
-# ★ここを差し替え：primary + full width
+if "recent_menu_sigs" not in st.session_state:
+    st.session_state.recent_menu_sigs = []
+if "last_menu_ids" not in st.session_state:
+    st.session_state.last_menu_ids = []
+
+# ★ここを差し替え：primary + full width + ボタン気分 + 似通い回避
 if st.button("ガチャ！", type="primary", use_container_width=True):
-    selection, score = generate_menu(items, preferred, counts, (diff_min, diff_max))
+    candidates = generate_candidates(items, preferred, counts, difficulty_range)
+
+    selection, score, sig, ids = pick_menu_from_candidates(
+        candidates,
+        pick_mode=pick_mode,
+        recent_signatures=st.session_state.recent_menu_sigs,
+        last_ids=st.session_state.last_menu_ids,
+    )
+
     if not selection:
         st.error("その条件を満たせるだけの候補が足りない。品数を減らすか、登録を増やして")
     else:
+        # 履歴更新（直近8回ぶん）
+        st.session_state.recent_menu_sigs = (st.session_state.recent_menu_sigs + [sig])[-8:]
+        st.session_state.last_menu_ids = ids
+
         st.markdown("**今日の献立**")
         for it, opt in selection:
             st.write(f"・{it.name}（{it.genre} / 面倒くささ:{it.difficulty} / 役割: {'・'.join(opt.groups)}）")
         st.caption(f"スコア: {score}")
 
-st.divider()
 
 # 2) メニュー追加（中段）
 st.header("➕ メニューを追加")
