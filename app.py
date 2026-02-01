@@ -6,7 +6,7 @@ import sqlite3
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Set
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -314,6 +314,58 @@ def feasible_auto_base_genres(
 # -----------------------------
 # ガチャロジック
 # -----------------------------
+def _genre_cluster(genre: str, preferred_genre: Optional[str]) -> str:
+    """
+    ジャンルの“同系統”判定。
+    和を選んだときは、和＋中を同じ系統として扱って「混ぜても不利すぎない」ようにする。
+    """
+    if preferred_genre == "和" and genre in ("和", "中"):
+        return "和中"
+    return genre
+
+
+def _genre_policy(preferred_genre: Optional[str], base_genre: Optional[str]) -> Tuple[Optional[Set[str]], Dict[str, float]]:
+    """
+    返り値:
+      allowed_genres: Noneならフィルタなし / setならその中だけ許可
+      bonus_map: genre -> bonus（weights用）
+    ルール:
+      - 和: 和＋中（ちょい混ぜ）＋その他
+      - 洋: 洋＋その他（和/中は混ぜない）
+      - 中: 中＋その他（和/洋は混ぜない）
+      - その他: その他のみ
+      - 自動: base + その他
+    """
+    if not preferred_genre:
+        return None, {}
+
+    if preferred_genre == "自動":
+        if base_genre is None:
+            return None, {}
+        return {base_genre, "その他"}, {base_genre: 1.18, "その他": 0.96}
+
+    if preferred_genre == "和":
+        allowed = {"和", "中", "その他"}
+        # 和はしっかり寄せつつ、中も少しだけ通す
+        bonus = {"和": 1.32, "中": 1.10, "その他": 0.95}
+        return allowed, bonus
+
+    if preferred_genre == "洋":
+        allowed = {"洋", "その他"}
+        bonus = {"洋": 1.28, "その他": 0.95}
+        return allowed, bonus
+
+    if preferred_genre == "中":
+        allowed = {"中", "その他"}
+        bonus = {"中": 1.28, "その他": 0.95}
+        return allowed, bonus
+
+    if preferred_genre == "その他":
+        return {"その他"}, {"その他": 1.0}
+
+    return None, {}
+
+
 def score_selection(
     selection: List[Tuple[MenuItem, RoleOption]],
     preferred_genre: Optional[str],
@@ -324,17 +376,25 @@ def score_selection(
 
     genres = [x.genre for x in items2]
     if genres:
-        base = genres[0]
-        same = sum(1 for g in genres if g == base)
-        if same == len(genres):
+        # 和を選んだときは、和＋中を同一クラスタとして扱う
+        clustered = [_genre_cluster(g, preferred_genre) for g in genres]
+        base = clustered[0]
+        same = sum(1 for g in clustered if g == base)
+        if same == len(clustered):
             score += 6
         else:
             score += 2 * max(0, same - 1)
-            score -= (len(genres) - same)
+            score -= (len(clustered) - same)
 
+    # ジャンル指定の加点（和だけ中華にも少し点を渡す）
     if preferred_genre and preferred_genre != "自動":
-        hit = sum(1 for x in items2 if x.genre == preferred_genre)
-        score += 2 * hit
+        if preferred_genre == "和":
+            wa = sum(1 for x in items2 if x.genre == "和")
+            chu = sum(1 for x in items2 if x.genre == "中")
+            score += 2 * wa + 1 * chu
+        else:
+            hit = sum(1 for x in items2 if x.genre == preferred_genre)
+            score += 2 * hit
 
     score -= max(0, len(items2) - target_dish_count)
     return score
@@ -389,6 +449,9 @@ def generate_candidates(
     """
     dmin, dmax = difficulty_range
 
+    # ジャンルの厳密ルール（和だけ中華を少し混ぜる）
+    allowed_genres, genre_bonus_map = _genre_policy(preferred_genre, base_genre)
+
     needed: List[str] = []
     for g in GROUPS:
         needed += [g] * max(0, int(counts.get(g, 0)))
@@ -417,16 +480,14 @@ def generate_candidates(
                 if not (dmin <= int(it.difficulty) <= dmax):
                     continue
 
-                # 自動ジャンルなら「基準ジャンル + その他」だけ許可
-                if preferred_genre == "自動" and base_genre is not None:
-                    if it.genre not in (base_genre, "その他"):
-                        continue
+                # ★ジャンルの厳密フィルタ（和だけ中華を許す、洋/中は厳密）
+                if allowed_genres is not None and it.genre not in allowed_genres:
+                    continue
 
+                # ★ジャンルボーナス（weights用）
                 genre_bonus = 1.0
-                if preferred_genre and preferred_genre != "自動":
-                    genre_bonus = 1.25 if it.genre == preferred_genre else 0.9
-                elif preferred_genre == "自動" and base_genre is not None:
-                    genre_bonus = 1.18 if it.genre == base_genre else 0.96
+                if genre_bonus_map:
+                    genre_bonus = genre_bonus_map.get(it.genre, 0.9)
 
                 for opt in it.role_options:
                     if target not in opt.groups:
