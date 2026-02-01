@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # -----------------------------
 # 設定
@@ -35,7 +36,6 @@ DIFFICULTY_LABELS = {
     4: "手間あり",
     5: "コース料理",
 }
-
 
 # -----------------------------
 # 型
@@ -64,6 +64,45 @@ def bootstrap_db_sqlite():
         if (not DB_PATH.exists()) and SEED_DB_PATH.exists():
             DB_PATH.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(SEED_DB_PATH, DB_PATH)
+
+
+def request_scroll(anchor_id: str) -> None:
+    st.session_state["_scroll_to"] = anchor_id
+
+
+def run_scroll_if_needed() -> None:
+    anchor = st.session_state.get("_scroll_to")
+    if not anchor:
+        return
+
+    # mobileだけで発火（幅は好みで調整）
+    js = f"""
+    <script>
+    (function() {{
+      const isMobile = window.parent.matchMedia("(max-width: 768px)").matches;
+      if (!isMobile) return;
+
+      const id = {json.dumps(anchor)};
+      let tries = 0;
+
+      function go() {{
+        const el = window.parent.document.getElementById(id);
+        if (el) {{
+          el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+        }} else if (tries < 25) {{
+          tries++;
+          setTimeout(go, 80);
+        }}
+      }}
+
+      setTimeout(go, 40);
+    }})();
+    </script>
+    """
+    components.html(js, height=0)
+
+    # 1回だけでいいから消す
+    st.session_state["_scroll_to"] = None
 
 
 def db_sqlite() -> sqlite3.Connection:
@@ -111,8 +150,6 @@ def ensure_db():
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS role_options_item_id_idx ON role_options(item_id);")
-
-        # 既存DBに後付けでdifficultyが無い場合に備える（冪等）
         cur.execute("ALTER TABLE items ADD COLUMN IF NOT EXISTS difficulty SMALLINT NOT NULL DEFAULT 3;")
 
     else:
@@ -337,7 +374,7 @@ def generate_candidates(
     preferred_genre: Optional[str],
     counts: Dict[str, int],
     difficulty_range: Tuple[int, int],
-    base_genre: Optional[str] = None,   # ★追加：自動ジャンル時の基準ジャンル
+    base_genre: Optional[str] = None,   # 自動ジャンル時の基準ジャンル
     tries: int = 650,
     keep: int = 260,
 ) -> List[Tuple[List[Tuple[MenuItem, RoleOption]], int, str, List[int]]]:
@@ -375,7 +412,7 @@ def generate_candidates(
                 if not (dmin <= int(it.difficulty) <= dmax):
                     continue
 
-                # ★自動ジャンルなら「基準ジャンル + その他」だけ許可
+                # 自動ジャンルなら「基準ジャンル + その他」だけ許可
                 if preferred_genre == "自動" and base_genre is not None:
                     if it.genre not in (base_genre, "その他"):
                         continue
@@ -384,7 +421,6 @@ def generate_candidates(
                 if preferred_genre and preferred_genre != "自動":
                     genre_bonus = 1.25 if it.genre == preferred_genre else 0.9
                 elif preferred_genre == "自動" and base_genre is not None:
-                    # 基準ジャンルを少し優遇、その他は少し控えめ
                     genre_bonus = 1.18 if it.genre == base_genre else 0.96
 
                 for opt in it.role_options:
@@ -441,11 +477,10 @@ def pick_menu_from_candidates(
     if not candidates:
         return [], -10**9, "", []
 
-    # 高スコア系は上位寄りのプールから選ぶ（ただし固定化しないよう重み+ペナルティ）
     if pick_mode in ("auto", "deluxe", "chef"):
         pool = candidates[:90]
     else:
-        pool = candidates[:]  # まんべんなく
+        pool = candidates[:]
 
     scores = [s for _sel, s, _sig, _ids in pool]
     min_s, max_s = min(scores), max(scores)
@@ -456,7 +491,6 @@ def pick_menu_from_candidates(
 
     weights: List[float] = []
     for sel, s, sig, ids in pool:
-        # スコア重み（モードによって強さを変える）
         t = (s - min_s) / denom  # 0..1
         w = 1.0
 
@@ -467,14 +501,11 @@ def pick_menu_from_candidates(
         elif pick_mode == "auto":
             w *= 0.45 + 3.4 * (t ** 3)
         else:
-            # usual / microwave はスコア偏らせない
             w *= 1.0
 
-        # 直近完全一致は強めに抑える
         if sig in recent_set:
             w *= 0.03
 
-        # 直近セットに似すぎるのも抑える（似通い対策）
         if last_set:
             ids_set = set(int(x) for x in ids)
             overlap = len(ids_set & last_set) / max(1, len(ids_set | last_set))  # 0..1
@@ -541,7 +572,6 @@ ensure_db()
 
 st.set_page_config(page_title="献立ガチャ", page_icon="🍚")
 
-# ★★★ ここから：ガチャボタンを目立たせるCSS ★★★
 st.markdown(
     """
 <style>
@@ -558,8 +588,6 @@ div[data-testid="stButton"] > button[kind="primary"]{
   transform: translateY(0);
   transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
 }
-
-/* ホバー/押下の気持ちよさ */
 div[data-testid="stButton"] > button[kind="primary"]:hover{
   transform: translateY(-1px);
   box-shadow: 0 14px 28px rgba(0,0,0,0.22);
@@ -574,17 +602,19 @@ div[data-testid="stButton"] > button[kind="primary"]:active{
 section.main .block-container{
   padding-top: 1.4rem;
 }
+
 /* ジャンル/面倒くささ の“選択ボタン”を 2行ぶんの高さに固定して中央寄せ */
 div[data-testid="stButton"] > button[kind="secondary"]{
-  height: 3.4rem;              /* 2行ぶん固定（足りなければ 3.8rem へ） */
+  height: 3.4rem;
   padding: 0.55rem 0.6rem;
   display: flex;
-  align-items: center;         /* 縦中央 */
-  justify-content: center;     /* 横中央 */
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  white-space: normal;         /* 折り返しOK */
+  white-space: normal;
   line-height: 1.15;
 }
+
 /* ===== 結果（今日の献立）をカード表示で目立たせる ===== */
 .result-card{
   border: 2px solid rgba(255,255,255,0.22);
@@ -612,26 +642,20 @@ div[data-testid="stButton"] > button[kind="secondary"]{
   opacity: 0.85;
 }
 
-/* ===== 区切り（登録済みメニューの前）を“間を空けて”見せる ===== */
+/* 区切りの余白 */
 hr{
   margin: 2.0rem 0 1.6rem 0;
   border: 0;
   border-top: 1px solid rgba(140,140,140,0.35);
 }
-/* ガチャ領域と下の編集領域の“間”を常に確保 */
-.section-gap{
-  height: 1.4rem;
-}
 </style>
 """,
     unsafe_allow_html=True,
 )
-# ★★★ ここまで ★★★
 
 st.title("🍚 献立ガチャ")
 
 items = load_items()
-
 tab_gacha, tab_edit = st.tabs(["🎲 ガチャ", "🛠 登録・編集"])
 
 # =============================
@@ -649,32 +673,44 @@ with tab_gacha:
 
     if g1.button("自動", key="btn_genre_auto", use_container_width=True):
         st.session_state.genre_choice = "自動"
+        request_scroll("anchor_difficulty")
     if g2.button("和食", key="btn_genre_wa", use_container_width=True):
         st.session_state.genre_choice = "和"
+        request_scroll("anchor_difficulty")
     if g3.button("洋食", key="btn_genre_yo", use_container_width=True):
         st.session_state.genre_choice = "洋"
+        request_scroll("anchor_difficulty")
     if g4.button("中華", key="btn_genre_chu", use_container_width=True):
         st.session_state.genre_choice = "中"
+        request_scroll("anchor_difficulty")
     if g5.button("その他", key="btn_genre_other", use_container_width=True):
         st.session_state.genre_choice = "その他"
+        request_scroll("anchor_difficulty")
 
     st.caption(f"いま: {st.session_state.genre_choice}")
     preferred = st.session_state.genre_choice
 
     # 面倒くささの気分（ボタン式）
+    st.markdown("<div id='anchor_difficulty'></div>", unsafe_allow_html=True)
+
     if "difficulty_preset" not in st.session_state:
         st.session_state.difficulty_preset = None
 
     st.write("面倒くささの気分（押さなければ自動）")
     b1, b2, b3, b4 = st.columns(4)
+
     if b1.button("レンチンばんざい", key="btn_preset_microwave", use_container_width=True):
         st.session_state.difficulty_preset = "microwave"
+        request_scroll("anchor_counts")
     if b2.button("いつものごはん", key="btn_preset_usual", use_container_width=True):
         st.session_state.difficulty_preset = "usual"
+        request_scroll("anchor_counts")
     if b3.button("ごうかなディナー", key="btn_preset_deluxe", use_container_width=True):
         st.session_state.difficulty_preset = "deluxe"
+        request_scroll("anchor_counts")
     if b4.button("シェフのおまかせコース", key="btn_preset_chef", use_container_width=True):
         st.session_state.difficulty_preset = "chef"
+        request_scroll("anchor_counts")
 
     label = {
         None: "自動（1〜5）",
@@ -685,7 +721,6 @@ with tab_gacha:
     }
     st.caption(f"いま: {label.get(st.session_state.difficulty_preset)}")
 
-    # 戻す手段
     if st.session_state.difficulty_preset is not None:
         if st.button("自動に戻す", key="btn_preset_reset"):
             st.session_state.difficulty_preset = None
@@ -693,13 +728,19 @@ with tab_gacha:
 
     difficulty_range, pick_mode = resolve_difficulty_preset(st.session_state.difficulty_preset)
 
+    # 品数（変更したらガチャへ）
+    st.markdown("<div id='anchor_counts'></div>", unsafe_allow_html=True)
+
+    def on_counts_change():
+        request_scroll("anchor_gacha")
+
     st.write("品数（基本は全部1。0にするとその枠は無し）")
     cA, cB, cC, cD, cE = st.columns(5)
-    n_shushoku = cA.selectbox("主食", [0, 1, 2, 3], index=1)
-    n_shusai = cB.selectbox("主菜", [0, 1, 2, 3], index=1)
-    n_fukusai = cC.selectbox("副菜", [0, 1, 2, 3], index=1)
-    n_milk = cD.selectbox("乳製品", [0, 1, 2, 3], index=0)
-    n_fruit = cE.selectbox("果物", [0, 1, 2, 3], index=0)
+    n_shushoku = cA.selectbox("主食", [0, 1, 2, 3], index=1, key="count_shushoku", on_change=on_counts_change)
+    n_shusai = cB.selectbox("主菜", [0, 1, 2, 3], index=1, key="count_shusai", on_change=on_counts_change)
+    n_fukusai = cC.selectbox("副菜", [0, 1, 2, 3], index=1, key="count_fukusai", on_change=on_counts_change)
+    n_milk = cD.selectbox("乳製品", [0, 1, 2, 3], index=0, key="count_milk", on_change=on_counts_change)
+    n_fruit = cE.selectbox("果物", [0, 1, 2, 3], index=0, key="count_fruit", on_change=on_counts_change)
 
     counts = {
         "主食": int(n_shushoku),
@@ -713,6 +754,8 @@ with tab_gacha:
         st.session_state.recent_menu_sigs = []
     if "last_menu_ids" not in st.session_state:
         st.session_state.last_menu_ids = []
+
+    st.markdown("<div id='anchor_gacha'></div>", unsafe_allow_html=True)
 
     if st.button("ガチャ！", type="primary", use_container_width=True):
         base_genre = None
@@ -758,6 +801,8 @@ with tab_gacha:
                 )
                 lines.append(f"<div class='result-item'>{line}</div>")
 
+            st.markdown("<div id='anchor_result'></div>", unsafe_allow_html=True)
+
             st.markdown(
                 f"""
 <div class="result-card">
@@ -768,6 +813,10 @@ with tab_gacha:
 """,
                 unsafe_allow_html=True,
             )
+
+            request_scroll("anchor_result")
+
+    run_scroll_if_needed()
 
 # =============================
 # タブ2: 登録・編集
@@ -842,11 +891,7 @@ with tab_edit:
             st.caption("追加キーが合ってないと保存できないニャ")
 
     st.divider()
-
     st.header("📚 登録済みメニュー")
-
-    # タブ切替中に items が古く見えたら嫌なので、ここで再ロードしてもいい
-    # items = load_items()
 
     if not items:
         st.info("まずは ごはん(主食/和), 味噌汁(副菜/和), 生姜焼き(主菜/和) あたりを入れてみよう")
